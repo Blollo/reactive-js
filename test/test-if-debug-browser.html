@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug [if] Updates</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .visible { background: lightgreen; padding: 10px; margin: 10px 0; }
+        .hidden { background: lightcoral; padding: 10px; margin: 10px 0; }
+        #log {
+            background: #f0f0f0;
+            padding: 10px;
+            margin: 20px 0;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Debug [if] Directive Updates</h1>
+
+    <div id="log">
+        <div>--- Console Log ---</div>
+    </div>
+
+    <button id="clear-log">Clear Log</button>
+    <button id="change-btn">Change Value</button>
+
+    <div id="app">
+        <h3>Test: Simple boolean [if]</h3>
+        <p>Current value: <span id="current-value">false</span></p>
+
+        <div id="test-element" [if]="showElement" class="visible">
+            <p>✓ Element is VISIBLE (showElement = true)</p>
+        </div>
+
+        <div id="marker">--- Marker (always visible) ---</div>
+    </div>
+
+    <script type="module">
+        import { ref, scanBindings } from '../reactive.js';
+
+        const logDiv = document.getElementById('log');
+
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString() + '.' + new Date().getMilliseconds();
+            const entry = document.createElement('div');
+            entry.textContent = `[${timestamp}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        document.getElementById('clear-log').addEventListener('click', () => {
+            logDiv.innerHTML = '<div>--- Console Log ---</div>';
+        });
+
+        log('=== Starting test ===');
+
+        const showElement = ref(false);
+        log(`Created ref: showElement = ${showElement.value}`);
+
+        const store = { showElement };
+        log('Created store');
+
+        log('About to call scanBindings...');
+        scanBindings(document.getElementById('app'), store);
+        log('scanBindings completed');
+
+        // Check if element is in DOM
+        const checkElement = () => {
+            const el = document.getElementById('test-element');
+            if (el) {
+                const style = window.getComputedStyle(el);
+                const inDOM = el.parentNode !== null;
+                log(`Element check: inDOM=${inDOM}, display=${style.display}, parent=${el.parentNode?.nodeName}`);
+            } else {
+                log('Element check: NOT FOUND in DOM');
+            }
+        };
+
+        log('Initial element check:');
+        checkElement();
+
+        document.getElementById('change-btn').addEventListener('click', () => {
+            log('=== BUTTON CLICKED ===');
+            log(`Before: showElement = ${showElement.value}`);
+
+            showElement.value = true;
+
+            log(`After: showElement = ${showElement.value}`);
+            document.getElementById('current-value').textContent = showElement.value;
+
+            // Check immediately
+            log('Immediate check:');
+            checkElement();
+
+            // Check after microtask
+            queueMicrotask(() => {
+                log('After microtask:');
+                checkElement();
+            });
+
+            // Check after 100ms
+            setTimeout(() => {
+                log('After 100ms:');
+                checkElement();
+            }, 100);
+        });
+
+        log('=== Setup complete ===');
+        log('Click "Change Value" button to toggle to true');
+    </script>
+</body>
+</html>

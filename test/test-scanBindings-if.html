@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test scanBindings with [if]</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .success { background: lightgreen; padding: 20px; margin: 10px 0; }
+        .info { background: lightblue; padding: 20px; margin: 10px 0; }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px 0; }
+        .test-section { border: 2px solid #333; padding: 20px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>Testing [if] Updates with scanBindings</h1>
+
+    <div id="app">
+        <!-- Test 1: Simple ref toggle -->
+        <div class="test-section">
+            <h2>Test 1: Simple ref (starts false)</h2>
+            <p>Current value: <strong id="test1-value">false</strong></p>
+            <button id="test1-btn">Toggle to TRUE</button>
+
+            <div [if]="showTest1" class="success">
+                <p>✓ SUCCESS! Element is now visible (showTest1 = true)</p>
+            </div>
+        </div>
+
+        <!-- Test 2: Computed value -->
+        <div class="test-section">
+            <h2>Test 2: Computed value (starts false)</h2>
+            <p>Count: <span id="test2-count">0</span></p>
+            <p>IsPositive (count > 0): <strong id="test2-value">false</strong></p>
+            <button id="test2-btn">Increment Count</button>
+
+            <div [if]="isPositive" class="success">
+                <p>✓ SUCCESS! Count is positive: {count}</p>
+            </div>
+        </div>
+
+        <!-- Test 3: Multiple updates -->
+        <div class="test-section">
+            <h2>Test 3: Multiple rapid updates</h2>
+            <p>Toggle count: <span id="test3-count">0</span></p>
+            <button id="test3-btn">Rapid Toggle (5 times)</button>
+
+            <div [if]="toggle3" class="success">
+                <p>✓ Toggle is ON</p>
+            </div>
+        </div>
+
+        <!-- Test 4: Your exact scenario -->
+        <div class="test-section">
+            <h2>Test 4: Your Scenario (computed with AND)</h2>
+            <p>AliceName: <span id="test4-alice">Alice</span></p>
+            <p>BobName: <span id="test4-bob">Bob</span></p>
+            <p>Condition: <span id="test4-condition">true</span></p>
+            <button id="test4-btn">Change Users</button>
+
+            <div [if]="aliceName === 'Alice' && bobName === 'Bob'" class="success">
+                <p>✓ Condition met: Alice AND Bob</p>
+            </div>
+
+            <div [if]="aliceName !== 'Alice'" class="info">
+                <p>✓ Alice name changed to: {aliceName}</p>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { ref, computed, scanBindings } from '../reactive.js';
+
+        // Test 1
+        const showTest1 = ref(false);
+
+        // Test 2
+        const count = ref(0);
+        const isPositive = computed(() => count.value > 0);
+
+        // Test 3
+        const toggle3 = ref(false);
+        let toggleCount = 0;
+
+        // Test 4
+        const users = ref([
+            { name: 'Alice', age: 25 },
+            { name: 'Bob', age: 30 }
+        ]);
+        const aliceName = computed(() => users.value[0].name);
+        const bobName = computed(() => users.value[1].name);
+
+        const store = {
+            showTest1,
+            count,
+            isPositive,
+            toggle3,
+            users,
+            aliceName,
+            bobName
+        };
+
+        // Scan bindings
+        console.log('Scanning bindings...');
+        scanBindings(document.getElementById('app'), store);
+        console.log('Bindings scanned!');
+
+        // Test 1 handler
+        document.getElementById('test1-btn').addEventListener('click', () => {
+            console.log('Test1: Toggling showTest1 to true');
+            showTest1.value = true;
+            document.getElementById('test1-value').textContent = showTest1.value;
+            console.log('showTest1 is now:', showTest1.value);
+        });
+
+        // Test 2 handler
+        document.getElementById('test2-btn').addEventListener('click', () => {
+            count.value++;
+            console.log('Test2: Incremented count to', count.value);
+            document.getElementById('test2-count').textContent = count.value;
+            document.getElementById('test2-value').textContent = isPositive.value;
+        });
+
+        // Test 3 handler
+        document.getElementById('test3-btn').addEventListener('click', () => {
+            console.log('Test3: Rapid toggling 5 times');
+            for (let i = 0; i < 5; i++) {
+                toggle3.value = !toggle3.value;
+                console.log(`  Toggle ${i + 1}: ${toggle3.value}`);
+            }
+            toggleCount += 5;
+            document.getElementById('test3-count').textContent = toggleCount;
+            console.log('Final toggle3 value:', toggle3.value);
+        });
+
+        // Test 4 handler
+        document.getElementById('test4-btn').addEventListener('click', () => {
+            console.log('Test4: Changing users');
+            console.log('Before:', { alice: aliceName.value, bob: bobName.value });
+
+            users.value = [
+                { name: 'Charlie', age: 35 },
+                { name: 'Diana', age: 28 }
+            ];
+
+            console.log('After:', { alice: aliceName.value, bob: bobName.value });
+
+            setTimeout(() => {
+                document.getElementById('test4-alice').textContent = aliceName.value;
+                document.getElementById('test4-bob').textContent = bobName.value;
+                const condition = aliceName.value === 'Alice' && bobName.value === 'Bob';
+                document.getElementById('test4-condition').textContent = condition;
+            }, 100);
+        });
+
+        console.log('All tests initialized');
+        console.log('Click buttons to test [if] directive updates');
+    </script>
+</body>
+</html>

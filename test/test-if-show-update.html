@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test [if] and [show] updates</title>
+    <style>
+        .test-section {
+            margin: 20px 0;
+            padding: 10px;
+            border: 2px solid #ccc;
+        }
+        .visible { background: lightgreen; }
+        .hidden { background: lightcoral; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <h1>Testing [if] and [show] attribute updates</h1>
+
+        <div class="test-section">
+            <h3>Test 1: [if] directive</h3>
+            <p>isVisible: <span id="if-status">false</span></p>
+            <button id="toggle-if">Toggle [if]</button>
+            <div [if]="isVisible" class="visible">
+                <p>This element uses [if] - should appear/disappear</p>
+            </div>
+        </div>
+
+        <div class="test-section">
+            <h3>Test 2: [show] directive</h3>
+            <p>isShown: <span id="show-status">false</span></p>
+            <button id="toggle-show">Toggle [show]</button>
+            <div [show]="isShown" class="visible">
+                <p>This element uses [show] - should show/hide</p>
+            </div>
+        </div>
+
+        <div class="test-section">
+            <h3>Test 3: Multiple updates in sequence</h3>
+            <p>count: <span id="count-status">0</span></p>
+            <button id="increment">Increment (shows when count > 0)</button>
+            <div [if]="count > 0" class="visible">
+                <p>Count is: {count}</p>
+            </div>
+        </div>
+
+        <div class="test-section">
+            <h3>Test 4: Computed value</h3>
+            <p>value: <span id="computed-value">0</span></p>
+            <p>doubled: <span id="computed-doubled">0</span></p>
+            <button id="increment-computed">Increment</button>
+            <div [show]="doubled > 5" class="visible">
+                <p>Doubled value ({doubled}) is greater than 5</p>
+            </div>
+        </div>
+
+        <div class="test-section">
+            <h3>Test 5: Async update</h3>
+            <button id="async-test">Test Async Update (2 sec delay)</button>
+            <div [if]="asyncVisible" class="visible">
+                <p>This should appear after 2 seconds</p>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { ref, computed, scanBindings } from '../reactive.js';
+
+        // Test 1: Basic [if]
+        const isVisible = ref(false);
+
+        // Test 2: Basic [show]
+        const isShown = ref(false);
+
+        // Test 3: Multiple updates
+        const count = ref(0);
+
+        // Test 4: Computed
+        const value = ref(0);
+        const doubled = computed(() => value.value * 2);
+
+        // Test 5: Async
+        const asyncVisible = ref(false);
+
+        const store = {
+            isVisible,
+            isShown,
+            count,
+            value,
+            doubled,
+            asyncVisible
+        };
+
+        // Initialize
+        scanBindings(document.getElementById('app'), store);
+
+        // Test 1 handlers
+        document.getElementById('toggle-if').addEventListener('click', () => {
+            isVisible.value = !isVisible.value;
+            document.getElementById('if-status').textContent = isVisible.value;
+            console.log('Toggled isVisible to:', isVisible.value);
+        });
+
+        // Test 2 handlers
+        document.getElementById('toggle-show').addEventListener('click', () => {
+            isShown.value = !isShown.value;
+            document.getElementById('show-status').textContent = isShown.value;
+            console.log('Toggled isShown to:', isShown.value);
+        });
+
+        // Test 3 handlers
+        document.getElementById('increment').addEventListener('click', () => {
+            count.value++;
+            document.getElementById('count-status').textContent = count.value;
+            console.log('Incremented count to:', count.value);
+        });
+
+        // Test 4 handlers
+        document.getElementById('increment-computed').addEventListener('click', () => {
+            value.value++;
+            document.getElementById('computed-value').textContent = value.value;
+            document.getElementById('computed-doubled').textContent = doubled.value;
+            console.log('Incremented value to:', value.value, 'doubled:', doubled.value);
+        });
+
+        // Test 5 handlers
+        document.getElementById('async-test').addEventListener('click', () => {
+            console.log('Starting async test - will update in 2 seconds');
+            setTimeout(() => {
+                console.log('Setting asyncVisible to true');
+                asyncVisible.value = true;
+            }, 2000);
+        });
+
+        console.log('App initialized');
+        console.log('All elements should start hidden/not shown');
+        console.log('Click buttons to test updates');
+    </script>
+</body>
+</html>

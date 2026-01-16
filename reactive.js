@@ -118,11 +118,31 @@ function trigger(subscribers) {
 
     if (debug) console.debug("trigger subscribers:", toRun.length);
 
-    toRun.forEach(fn => queueEffect(fn));
+    // Separate sync and async effects
+    const syncEffects = [];
+    const asyncEffects = [];
+
+    toRun.forEach(fn => {
+        if (fn.sync) {
+            syncEffects.push(fn);
+        } else {
+            asyncEffects.push(fn);
+        }
+    });
+
+    // Run sync effects immediately
+    syncEffects.forEach(fn => {
+        if (!fn.stopped) {
+            fn();
+        }
+    });
+
+    // Queue async effects for batching
+    asyncEffects.forEach(fn => queueEffect(fn));
 }
 /* </reactivity-helpers> */
 
-export function effect(fn) {
+export function effect(fn, options = {}) {
     const wrapped = function wrappedEffect() {
         // Don't run if stopped
         if (wrapped.stopped) {
@@ -144,6 +164,7 @@ export function effect(fn) {
 
     wrapped.deps = [];
     wrapped.stopped = false;
+    wrapped.sync = options.sync || false; // Mark if effect should run synchronously
 
     // Add a stop method to cleanup and prevent future runs
     wrapped.stop = function() {
@@ -284,7 +305,7 @@ export function computed(getter) {
 
     effect(() => {
         result.value = getter();
-    });
+    }, { sync: true }); // Computed effects run synchronously
 
     return result;
 }
@@ -356,48 +377,6 @@ export function watch(source, callback, options = {}) {
 //
 
 const scanned = new WeakSet();
-const elementEffects = new WeakMap();
-
-// Track effects for an element
-function trackElementEffect(element, effect) {
-    if (!elementEffects.has(element)) {
-        elementEffects.set(element, []);
-    }
-    elementEffects.get(element).push(effect);
-}
-
-// Cleanup effects when elements are removed
-if (typeof MutationObserver !== "undefined") {
-    const observer = new MutationObserver(mutations => {
-        mutations.forEach(mutation => {
-            mutation.removedNodes.forEach(node => {
-                if (node.nodeType === Node.ELEMENT_NODE) {
-                    // Cleanup effects for this element
-                    const effects = elementEffects.get(node);
-                    if (effects) {
-                        effects.forEach(eff => eff.stop());
-                    }
-
-                    // Cleanup effects for all descendants
-                    node.querySelectorAll("*").forEach(child => {
-                        const childEffects = elementEffects.get(child);
-                        if (childEffects) {
-                            childEffects.forEach(eff => eff.stop());
-                        }
-                    });
-                }
-            });
-        });
-    });
-
-    // Start observing the document
-    if (typeof document !== "undefined") {
-        observer.observe(document.body || document.documentElement, {
-            childList: true,
-            subtree: true
-        });
-    }
-}
 const directives = {
     "ref":           bindElementRef,
     "[ref]":         bindElementRef,
@@ -502,12 +481,42 @@ function evalInScope (expr, store) {
     }
 
     try {
-        // Extract all keys from the store
-        const keys = Object.keys(store);
-        const values = keys.map(key => unwrapRef(store[key]));
+        // JavaScript keywords that should not be treated as variables
+        const keywords = new Set([
+            'await', 'break', 'case', 'catch', 'class', 'const', 'continue',
+            'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends',
+            'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof',
+            'let', 'new', 'return', 'static', 'super', 'switch', 'this', 'throw',
+            'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
+            'true', 'false', 'null', 'undefined', 'NaN', 'Infinity'
+        ]);
 
-        // Create a function with parameters for each key
-        // This avoids using 'with' statement
+        // Extract potential variable names from the expression
+        const varPattern = /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g;
+        const matches = expr.matchAll(varPattern);
+        const potentialVars = new Set();
+
+        for (const match of matches) {
+            const varName = match[1];
+            // Skip JavaScript keywords
+            if (!keywords.has(varName)) {
+                potentialVars.add(varName);
+            }
+        }
+
+        // Try to get values for these variables from the store
+        // Using 'in' operator works with Proxies (triggers 'has' trap)
+        const keys = [];
+        const values = [];
+
+        for (const varName of potentialVars) {
+            if (varName in store) {
+                keys.push(varName);
+                values.push(unwrapRef(store[varName]));
+            }
+        }
+
+        // Create a function with parameters for each variable found in the expression
         const fn = new Function(...keys, `return (${expr});`);
         return fn(...values);
     }
@@ -731,27 +740,24 @@ function bindElementRef (el, name, store) {
     store[name].value = el;
 }
 function bindText (el, expr, store) {
-    const eff = effect(() => {
+    effect(() => {
         const result = evalInScope(expr, store);
         el.textContent = result == null ? "" : result;
     });
-    trackElementEffect(el, eff);
 }
 function bindHTML (el, expr, store) {
-    const eff = effect(() => {
+    effect(() => {
         const result = evalInScope(expr, store);
         el.innerHTML = result == null ? "" : result;
     });
-    trackElementEffect(el, eff);
 }
 function bindModel (el, expr, store) {
     if (el.type === "checkbox" || el.tagName === "HS-TOGGLE") {
         // When store changes -> update component
-        const eff = effect(() => {
+        effect(() => {
             const val = evalInScope(expr, store);
             el.checked = !!val;
         });
-        trackElementEffect(el, eff);
 
         // When component changes -> update store
         el.addEventListener("change", e => {
@@ -759,11 +765,10 @@ function bindModel (el, expr, store) {
         });
     }
     else if (el.type === "radio") {
-        const eff = effect(() => {
+        effect(() => {
             const val = evalInScope(expr, store);
             el.checked = val === el.value;
         });
-        trackElementEffect(el, eff);
 
         el.addEventListener("change", e => {
             if (e.target.checked) {
@@ -772,22 +777,20 @@ function bindModel (el, expr, store) {
         });
     }
     else if (el.tagName === "HS-SEGMENT" || el.tagName === "HS-SELECT") {
-        const eff = effect(() => {
+        effect(() => {
             const val = evalInScope(expr, store);
             if (el.value !== val) el.value = val;
         });
-        trackElementEffect(el, eff);
 
         el.addEventListener("change", () => {
             setDeep(store, expr, el.value);
         });
     }
     else {
-        const eff = effect(() => {
+        effect(() => {
             const val = evalInScope(expr, store);
             el.value = val ?? "";
         });
-        trackElementEffect(el, eff);
 
         el.addEventListener("input", e => {
             setDeep(store, expr, e.target.value);
@@ -802,7 +805,7 @@ function bindIf (el, expr, store) {
     parent.replaceChild(comment, el);
     let isInserted = false;
 
-    const eff = effect(() => {
+    effect(() => {
         if (debug) console.log("expr:", expr, "→", evalInScope(expr, store));
 
         const show = !!evalInScope(expr, store);
@@ -820,12 +823,11 @@ function bindIf (el, expr, store) {
             isInserted = false;
         }
     });
-    trackElementEffect(el, eff);
 }
 function bindShow (el, expr, store) {
     const originalDisplay = getComputedStyle(el).display || "";
 
-    const eff = effect(() => {
+    effect(() => {
         const visible = !!evalInScope(expr, store);
 
         if (visible) {
@@ -835,18 +837,16 @@ function bindShow (el, expr, store) {
             el.style.setProperty("display", "none", "important");
         }
     });
-    trackElementEffect(el, eff);
 }
 function bindDisabled (el, expr, store) {
-    const eff = effect(() => {
+    effect(() => {
         el.disabled = !!evalInScope(expr, store);
     });
-    trackElementEffect(el, eff);
 }
 function bindClass (el, expr, store) {
     const staticClasses = new Set(el.className.split(/\s+/).filter(Boolean));
 
-    const eff = effect(() => {
+    effect(() => {
         el.className = [...staticClasses].join(" ");
         const value = evalInScope(expr, store);
 
@@ -864,11 +864,10 @@ function bindClass (el, expr, store) {
             });
         }
     });
-    trackElementEffect(el, eff);
 }
 function bindDynamicAttribute (el, attrName, expr, store) {
     // When store changes -> update component
-    const eff = effect(() => {
+    effect(() => {
         const value = evalInScope(expr, store);
 
         if (value === null) {
@@ -878,7 +877,6 @@ function bindDynamicAttribute (el, attrName, expr, store) {
             el.setAttribute(attrName, value);
         }
     });
-    trackElementEffect(el, eff);
 }
 function bindCurlyInterpolations (node, scope) {
     const original = node.textContent;
@@ -928,14 +926,13 @@ function bindCurlyInterpolations (node, scope) {
             return;
         }
 
-        const eff = effect(() => {
+        effect(() => {
             const v = evalInScope(p.expr, scope);
             n.textContent = v == null ? "" : String(v);
         });
 
         // Track effect on parent element if it's an element node
         if (parentEl && parentEl.nodeType === Node.ELEMENT_NODE) {
-            trackElementEffect(parentEl, eff);
         }
     });
 }
