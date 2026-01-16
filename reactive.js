@@ -163,12 +163,30 @@ export function ref(initialValue) {
 }
 export function computed(getter) {
     const result = ref();
-    
+
     effect(() => {
         result.value = getter();
     });
 
     return result;
+}
+export function watch(source, callback) {
+    let oldValue;
+    let initialized = false;
+
+    return effect(() => {
+        // If source is a ref/computed, access .value to track it
+        const newValue = (source && typeof source === "object" && "value" in source)
+            ? source.value
+            : source;
+
+        if (initialized) {
+            callback(newValue, oldValue);
+        }
+
+        oldValue = newValue;
+        initialized = true;
+    });
 }
 
 //
