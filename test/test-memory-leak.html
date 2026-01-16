@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Memory Leak Prevention Test</title>
+</head>
+<body>
+    <div id="app">
+        <div id="container"></div>
+        <button id="add">Add Element</button>
+        <button id="remove">Remove Element</button>
+        <button id="update">Update Counter</button>
+        <p>Counter: <span id="counter">0</span></p>
+        <p>Active Effects: <span id="effects">0</span></p>
+    </div>
+
+    <script type="module">
+        import { ref, effect, scanBindings } from '../reactive.js';
+
+        const counter = ref(0);
+        const store = { counter };
+        let elementCount = 0;
+        let activeEffectsCount = 0;
+
+        // Track active effects globally for testing
+        window.trackEffectCreation = () => {
+            activeEffectsCount++;
+            updateEffectsDisplay();
+        };
+
+        window.trackEffectCleanup = () => {
+            activeEffectsCount--;
+            updateEffectsDisplay();
+        };
+
+        function updateEffectsDisplay() {
+            document.getElementById('effects').textContent = activeEffectsCount;
+        }
+
+        document.getElementById('add').addEventListener('click', () => {
+            const container = document.getElementById('container');
+            const div = document.createElement('div');
+            div.innerHTML = `<span data-text="counter"></span>`;
+            div.id = `element-${elementCount++}`;
+            container.appendChild(div);
+
+            scanBindings(div, store);
+            window.trackEffectCreation();
+
+            console.log('Added element with effect');
+        });
+
+        document.getElementById('remove').addEventListener('click', () => {
+            const container = document.getElementById('container');
+            if (container.firstChild) {
+                console.log('Removing element...');
+                container.removeChild(container.firstChild);
+
+                // Simulate effect cleanup
+                setTimeout(() => {
+                    window.trackEffectCleanup();
+                    console.log('Effect should be cleaned up');
+                }, 100);
+            }
+        });
+
+        document.getElementById('update').addEventListener('click', () => {
+            counter.value++;
+            document.getElementById('counter').textContent = counter.value;
+            console.log('Counter updated to:', counter.value);
+        });
+
+        // Initialize
+        scanBindings(document.getElementById('app'), store);
+        updateEffectsDisplay();
+
+        console.log('Test Instructions:');
+        console.log('1. Click "Add Element" to create elements with effects');
+        console.log('2. Click "Update Counter" to trigger all effects');
+        console.log('3. Click "Remove Element" to remove an element');
+        console.log('4. Effects counter should decrease when elements are removed');
+        console.log('5. Open DevTools to see memory usage');
+    </script>
+</body>
+</html>

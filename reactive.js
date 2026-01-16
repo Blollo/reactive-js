@@ -47,27 +47,66 @@ arrayMutatorMethods.forEach(methodName => {
 });
 
 /* <reactivity-helpers> */
+const effectQueue = new Set();
+let isFlushing = false;
+let isFlushPending = false;
+
 function cleanup(effect) {
     if (!effect.deps) {
         return;
     }
-    
+
     for (let dep of effect.deps) {
         dep.delete(effect);
     }
-    
+
     effect.deps.length = 0;
 }
 function track(subscribers) {
     if (!activeEffect) {
         return;
     }
-    
+
     if (!subscribers.has(activeEffect)) {
         subscribers.add(activeEffect);
         activeEffect.deps.push(subscribers);
 
         if (debug) console.debug("tracked effect", (activeEffect.name || "<anonymous>"), "-> subs:", subscribers.size);
+    }
+}
+function queueEffect(effect) {
+    if (!effectQueue.has(effect)) {
+        effectQueue.add(effect);
+
+        if (!isFlushing && !isFlushPending) {
+            isFlushPending = true;
+            queueMicrotask(flushEffectQueue);
+        }
+    }
+}
+function flushEffectQueue() {
+    isFlushPending = false;
+    isFlushing = true;
+
+    try {
+        const effects = Array.from(effectQueue);
+        effectQueue.clear();
+
+        if (debug) console.debug("flushing", effects.length, "effects");
+
+        effects.forEach(fn => {
+            if (!fn.stopped) {
+                fn();
+            }
+        });
+    }
+    finally {
+        isFlushing = false;
+
+        // If new effects were queued during flush, flush again
+        if (effectQueue.size > 0) {
+            flushEffectQueue();
+        }
     }
 }
 function trigger(subscribers) {
@@ -76,15 +115,20 @@ function trigger(subscribers) {
     }
 
     const toRun = Array.from(subscribers);
-    
+
     if (debug) console.debug("trigger subscribers:", toRun.length);
 
-    toRun.forEach(fn => fn());
+    toRun.forEach(fn => queueEffect(fn));
 }
 /* </reactivity-helpers> */
 
 export function effect(fn) {
     const wrapped = function wrappedEffect() {
+        // Don't run if stopped
+        if (wrapped.stopped) {
+            return;
+        }
+
         cleanup(wrappedEffect);
         effectStack.push(wrappedEffect);
         activeEffect = wrappedEffect;
@@ -99,28 +143,53 @@ export function effect(fn) {
     };
 
     wrapped.deps = [];
+    wrapped.stopped = false;
+
+    // Add a stop method to cleanup and prevent future runs
+    wrapped.stop = function() {
+        if (!wrapped.stopped) {
+            cleanup(wrapped);
+            wrapped.stopped = true;
+        }
+    };
+
     wrapped();
 
     return wrapped;
 }
+function createArrayProxy(arr, subs) {
+    // Attach subs reference and patched methods
+    Object.defineProperty(arr, "__v_subs", {
+        value: subs,
+        enumerable: false,
+        writable: true
+    });
+    Object.setPrototypeOf(arr, patchedArrayMethods);
+
+    // Wrap in proxy to intercept index assignments
+    return new Proxy(arr, {
+        set(target, prop, value) {
+            // Check if it's a numeric index
+            const index = Number(prop);
+            if (!isNaN(index) && index >= 0) {
+                target[prop] = value;
+                trigger(subs);
+                return true;
+            }
+
+            // For other properties, set normally
+            target[prop] = value;
+            return true;
+        }
+    });
+}
+
 export function ref(initialValue) {
     const subs = new Set();
 
-    // Check if the initial value is a plain array
-    const isArray = Array.isArray(initialValue);
-    
-    // If it's an array, attach the subscriber set and the patched prototype
-    if (isArray) {
-        // Attach subs reference to the array itself for mutator methods to access
-        // Use Object.defineProperty to make it non-enumerable
-        Object.defineProperty(initialValue, "__v_subs", {
-            value: subs,
-            enumerable: false,
-            writable: true
-        });
-        
-        // Change the array's prototype to use our patched methods
-        Object.setPrototypeOf(initialValue, patchedArrayMethods);
+    // If it's an array, wrap it in a proxy
+    if (Array.isArray(initialValue)) {
+        initialValue = createArrayProxy(initialValue, subs);
     }
 
     const data = { value: initialValue };
@@ -129,7 +198,6 @@ export function ref(initialValue) {
         get(target, prop) {
             if (prop === "value") {
                 track(subs);
-
                 return target[prop];
             }
         },
@@ -138,28 +206,78 @@ export function ref(initialValue) {
                 return false;
             }
 
-            // const oldVal = target[prop];
-            target[prop] = newVal;
-
-            // if it's a completely new array, patch it.
+            // If it's a new array, wrap it in a proxy
             if (Array.isArray(newVal) && !newVal.__v_subs) {
-                Object.defineProperty(newVal, '__v_subs', {
-                    value: subs, // Reuse the existing subs set
-                    enumerable: false,
-                    writable: true
-                });
-                Object.setPrototypeOf(newVal, patchedArrayMethods);
+                newVal = createArrayProxy(newVal, subs);
             }
 
-            // if the new value is NOT the array, it's an explicit assignment, so trigger normally.
-
-            // if the value IS the array, this trigger is redundant if mutation methods are used,
-            // but necessary for replacement like `arrayRef.value = newArray`.
+            target[prop] = newVal;
             trigger(subs);
 
             return true;
         }
     });
+}
+// WeakMap to cache reactive proxies
+const reactiveMap = new WeakMap();
+
+export function reactive(target) {
+    if (!target || typeof target !== "object") {
+        console.warn("reactive() expects an object");
+        return target;
+    }
+
+    // Return existing proxy if already reactive
+    if (reactiveMap.has(target)) {
+        return reactiveMap.get(target);
+    }
+
+    // Map to store subscribers for each property
+    const subsMap = new Map();
+
+    const getSubscribers = (prop) => {
+        if (!subsMap.has(prop)) {
+            subsMap.set(prop, new Set());
+        }
+        return subsMap.get(prop);
+    };
+
+    const handler = {
+        get(target, prop) {
+            // Don't intercept internal properties
+            if (prop === "__v_isReactive") {
+                return true;
+            }
+
+            track(getSubscribers(prop));
+
+            const value = target[prop];
+
+            // Recursively make nested objects reactive
+            if (value && typeof value === "object") {
+                return reactive(value);
+            }
+
+            return value;
+        },
+        set(target, prop, newVal) {
+            const oldVal = target[prop];
+
+            if (oldVal === newVal) {
+                return true;
+            }
+
+            target[prop] = newVal;
+            trigger(getSubscribers(prop));
+
+            return true;
+        }
+    };
+
+    const proxy = new Proxy(target, handler);
+    reactiveMap.set(target, proxy);
+
+    return proxy;
 }
 export function computed(getter) {
     const result = ref();
@@ -170,35 +288,116 @@ export function computed(getter) {
 
     return result;
 }
-export function watch(source, callback) {
+export function watch(source, callback, options = {}) {
     let oldValue;
     let initialized = false;
 
-    return effect(() => {
-        // If source is a ref/computed, access .value to track it
-        const newValue = (source && typeof source === "object" && "value" in source)
-            ? source.value
-            : source;
+    const deepClone = (val) => {
+        if (val === null || typeof val !== "object") {
+            return val;
+        }
 
-        if (initialized) {
+        if (Array.isArray(val)) {
+            return val.map(deepClone);
+        }
+
+        const cloned = {};
+        for (const key in val) {
+            if (val.hasOwnProperty(key)) {
+                cloned[key] = deepClone(val[key]);
+            }
+        }
+        return cloned;
+    };
+
+    const watchEffect = effect(() => {
+        let newValue;
+
+        // If source is a function (getter), call it to track dependencies
+        if (typeof source === "function") {
+            newValue = source();
+        }
+        // If source is a ref/computed, access .value to track it
+        else if (source && typeof source === "object" && "value" in source) {
+            newValue = source.value;
+        }
+        // If source is a reactive object, access it to track (deep watch if options.deep)
+        else if (source && typeof source === "object" && source.__v_isReactive) {
+            if (options.deep) {
+                // Deep access to track all nested properties
+                newValue = JSON.parse(JSON.stringify(source));
+            } else {
+                newValue = source;
+            }
+        }
+        // Otherwise use the source directly
+        else {
+            newValue = source;
+        }
+
+        if (initialized || options.immediate) {
             callback(newValue, oldValue);
         }
 
-        oldValue = newValue;
+        oldValue = deepClone(newValue);
         initialized = true;
     });
+
+    return watchEffect;
 }
 
 //
-//  ____   ___  __  __   ____  _           _ _             
-// |  _ \ / _ \|  \/  | | __ )(_)_ __   __| (_)_ __   __ _ 
+//  ____   ___  __  __   ____  _           _ _
+// |  _ \ / _ \|  \/  | | __ )(_)_ __   __| (_)_ __   __ _
 // | | | | | | | |\/| | |  _ \| | '_ \ / _` | | '_ \ / _` |
 // | |_| | |_| | |  | | | |_) | | | | | (_| | | | | | (_| |
 // |____/ \___/|_|  |_| |____/|_|_| |_|\__,_|_|_| |_|\__, |
-//                                                   |___/ 
+//                                                   |___/
 //
 
 const scanned = new WeakSet();
+const elementEffects = new WeakMap();
+
+// Track effects for an element
+function trackElementEffect(element, effect) {
+    if (!elementEffects.has(element)) {
+        elementEffects.set(element, []);
+    }
+    elementEffects.get(element).push(effect);
+}
+
+// Cleanup effects when elements are removed
+if (typeof MutationObserver !== "undefined") {
+    const observer = new MutationObserver(mutations => {
+        mutations.forEach(mutation => {
+            mutation.removedNodes.forEach(node => {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    // Cleanup effects for this element
+                    const effects = elementEffects.get(node);
+                    if (effects) {
+                        effects.forEach(eff => eff.stop());
+                    }
+
+                    // Cleanup effects for all descendants
+                    node.querySelectorAll("*").forEach(child => {
+                        const childEffects = elementEffects.get(child);
+                        if (childEffects) {
+                            childEffects.forEach(eff => eff.stop());
+                        }
+                    });
+                }
+            });
+        });
+    });
+
+    // Start observing the document
+    if (typeof document !== "undefined") {
+        observer.observe(document.body || document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+    }
+}
 const directives = {
     "ref":           bindElementRef,
     "[ref]":         bindElementRef,
@@ -303,23 +502,15 @@ function evalInScope (expr, store) {
     }
 
     try {
-        const scope = new Proxy(Object.create(null), {
-            get(_, key) {
-                if (key === Symbol.unscopables) {
-                    return undefined;
-                }
+        // Extract all keys from the store
+        const keys = Object.keys(store);
+        const values = keys.map(key => unwrapRef(store[key]));
 
-                return unwrapRef(store[key]);
-            },
-            has(_, key) {
-                return key in store;
-            }
-        });
-
-        // build function only for non-empty expr
-        const fn = new Function("scope", `with(scope) { return (${expr}); }`);
-        return fn(scope);
-    } 
+        // Create a function with parameters for each key
+        // This avoids using 'with' statement
+        const fn = new Function(...keys, `return (${expr});`);
+        return fn(...values);
+    }
     catch (e) {
         console.error("evalInScope error:", expr, e);
         return undefined;
@@ -540,24 +731,27 @@ function bindElementRef (el, name, store) {
     store[name].value = el;
 }
 function bindText (el, expr, store) {
-    effect(() => {
+    const eff = effect(() => {
         const result = evalInScope(expr, store);
         el.textContent = result == null ? "" : result;
     });
+    trackElementEffect(el, eff);
 }
 function bindHTML (el, expr, store) {
-    effect(() => {
+    const eff = effect(() => {
         const result = evalInScope(expr, store);
         el.innerHTML = result == null ? "" : result;
     });
+    trackElementEffect(el, eff);
 }
 function bindModel (el, expr, store) {
     if (el.type === "checkbox" || el.tagName === "HS-TOGGLE") {
         // When store changes -> update component
-        effect(() => {
+        const eff = effect(() => {
             const val = evalInScope(expr, store);
             el.checked = !!val;
         });
+        trackElementEffect(el, eff);
 
         // When component changes -> update store
         el.addEventListener("change", e => {
@@ -565,10 +759,11 @@ function bindModel (el, expr, store) {
         });
     }
     else if (el.type === "radio") {
-        effect(() => {
+        const eff = effect(() => {
             const val = evalInScope(expr, store);
             el.checked = val === el.value;
         });
+        trackElementEffect(el, eff);
 
         el.addEventListener("change", e => {
             if (e.target.checked) {
@@ -577,20 +772,22 @@ function bindModel (el, expr, store) {
         });
     }
     else if (el.tagName === "HS-SEGMENT" || el.tagName === "HS-SELECT") {
-        effect(() => {
+        const eff = effect(() => {
             const val = evalInScope(expr, store);
             if (el.value !== val) el.value = val;
         });
+        trackElementEffect(el, eff);
 
         el.addEventListener("change", () => {
             setDeep(store, expr, el.value);
         });
     }
     else {
-        effect(() => {
+        const eff = effect(() => {
             const val = evalInScope(expr, store);
             el.value = val ?? "";
         });
+        trackElementEffect(el, eff);
 
         el.addEventListener("input", e => {
             setDeep(store, expr, e.target.value);
@@ -605,17 +802,17 @@ function bindIf (el, expr, store) {
     parent.replaceChild(comment, el);
     let isInserted = false;
 
-    effect(() => {
+    const eff = effect(() => {
         if (debug) console.log("expr:", expr, "→", evalInScope(expr, store));
 
         const show = !!evalInScope(expr, store);
-        
+
         if (debug) console.log("show:", expr, show)
 
         if (show && !isInserted) {
             parent.insertBefore(el, comment);
             isInserted = true;
-        } 
+        }
         else if (!show && isInserted) {
             if (el.parentNode) {
                 parent.replaceChild(comment, el)
@@ -623,39 +820,42 @@ function bindIf (el, expr, store) {
             isInserted = false;
         }
     });
+    trackElementEffect(el, eff);
 }
 function bindShow (el, expr, store) {
     const originalDisplay = getComputedStyle(el).display || "";
 
-    effect(() => {
+    const eff = effect(() => {
         const visible = !!evalInScope(expr, store);
 
         if (visible) {
             el.style.setProperty("display", originalDisplay, "");
-        } 
+        }
         else {
             el.style.setProperty("display", "none", "important");
         }
     });
+    trackElementEffect(el, eff);
 }
 function bindDisabled (el, expr, store) {
-    effect(() => {
+    const eff = effect(() => {
         el.disabled = !!evalInScope(expr, store);
     });
+    trackElementEffect(el, eff);
 }
 function bindClass (el, expr, store) {
     const staticClasses = new Set(el.className.split(/\s+/).filter(Boolean));
 
-    effect(() => {
+    const eff = effect(() => {
         el.className = [...staticClasses].join(" ");
         const value = evalInScope(expr, store);
 
         if (typeof value === "string") {
             if (value.trim()) el.classList.add(...value.split(/\s+/));
-        } 
+        }
         else if (Array.isArray(value)) {
             el.classList.add(...value);
-        } 
+        }
         else if (value && typeof value === "object") {
             Object.entries(value).forEach(([cls, active]) => {
                 if (active) {
@@ -664,19 +864,21 @@ function bindClass (el, expr, store) {
             });
         }
     });
+    trackElementEffect(el, eff);
 }
 function bindDynamicAttribute (el, attrName, expr, store) {
     // When store changes -> update component
-    effect(() => {
+    const eff = effect(() => {
         const value = evalInScope(expr, store);
 
         if (value === null) {
             el.removeAttribute(attrName);
-        } 
+        }
         else {
             el.setAttribute(attrName, value);
         }
     });
+    trackElementEffect(el, eff);
 }
 function bindCurlyInterpolations (node, scope) {
     const original = node.textContent;
@@ -709,10 +911,11 @@ function bindCurlyInterpolations (node, scope) {
 
     // Turn the whole text node into a sequence of child text nodes
     node.textContent = "";
+    const parentEl = node.parentNode;
     const nodes = parts.map(p => {
         const n = document.createTextNode(p.type === "static" ? p.value : "");
 
-        node.parentNode.insertBefore(n, node);
+        parentEl.insertBefore(n, node);
 
         return { p, n };
     });
@@ -725,10 +928,15 @@ function bindCurlyInterpolations (node, scope) {
             return;
         }
 
-        effect(() => {
+        const eff = effect(() => {
             const v = evalInScope(p.expr, scope);
             n.textContent = v == null ? "" : String(v);
         });
+
+        // Track effect on parent element if it's an element node
+        if (parentEl && parentEl.nodeType === Node.ELEMENT_NODE) {
+            trackElementEffect(parentEl, eff);
+        }
     });
 }
 function bindEventListeners (el, store) {
