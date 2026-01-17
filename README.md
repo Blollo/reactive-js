@@ -1,4 +1,4 @@
-# Reactive Framework
+# Reactive JS
 
 A lightweight, Vue-inspired reactive framework that brings reactivity and declarative DOM bindings to vanilla JavaScript.
 
