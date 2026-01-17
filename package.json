@@ -1,0 +1,22 @@
+{
+  "name": "reactive",
+  "version": "1.0.0",
+  "description": "Vue-inspired mini reactive framework",
+  "type": "module",
+  "scripts": {
+    "test": "npm run test:unit && npm run test:dom",
+    "test:unit": "node test/unit-tests.js",
+    "test:dom": "node test/dom-tests.js",
+    "test:watch": "nodemon -w reactive.js -w test/ -x 'npm test'"
+  },
+  "keywords": [
+    "reactive",
+    "framework",
+    "vue"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "jsdom": "^23.0.0"
+  }
+}
