@@ -357,12 +357,16 @@ export function watch(source, callback, options = {}) {
         }
 
         if (initialized || options.immediate) {
+            // Run callback without tracking to prevent circular dependencies
+            const prev = activeEffect;
+            activeEffect = null;
             callback(newValue, oldValue);
+            activeEffect = prev;
         }
 
         oldValue = deepClone(newValue);
         initialized = true;
-    });
+    }, { sync: false }); // Watch callbacks are async to prevent infinite loops
 
     return watchEffect;
 }
@@ -474,6 +478,9 @@ function unwrapRef (v) {
 
     return v;
 }
+// Cache for compiled functions
+const fnCache = new Map();
+
 function evalInScope (expr, store) {
     expr = (expr || "").trim();
     if (!expr) {
@@ -504,20 +511,29 @@ function evalInScope (expr, store) {
             }
         }
 
-        // Try to get values for these variables from the store
-        // Using 'in' operator works with Proxies (triggers 'has' trap)
+        // Build list of keys that exist in store
         const keys = [];
-        const values = [];
-
         for (const varName of potentialVars) {
             if (varName in store) {
                 keys.push(varName);
-                values.push(unwrapRef(store[varName]));
             }
         }
 
-        // Create a function with parameters for each variable found in the expression
-        const fn = new Function(...keys, `return (${expr});`);
+        // Get or create cached function
+        const cacheKey = keys.join(',') + ':' + expr;
+        let fn = fnCache.get(cacheKey);
+        if (!fn) {
+            fn = new Function(...keys, `return (${expr});`);
+            fnCache.set(cacheKey, fn);
+        }
+
+        // Build values array - unwrap refs while tracking is active
+        // This allows effects to track dependencies
+        const values = keys.map(key => {
+            const val = store[key];
+            return (val && typeof val === "object" && "value" in val) ? val.value : val;
+        });
+
         return fn(...values);
     }
     catch (e) {

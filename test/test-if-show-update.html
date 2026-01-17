@@ -63,7 +63,7 @@
     </div>
 
     <script type="module">
-        import { ref, computed, scanBindings } from '../reactive.js';
+        import { ref, computed, watch, scanBindings } from '../reactive.js';
 
         // Test 1: Basic [if]
         const isVisible = ref(false);
@@ -80,6 +80,13 @@
 
         // Test 5: Async
         const asyncVisible = ref(false);
+
+        watch(isShown, (newVal) => {
+            if (newVal) {
+                count.value++;
+            }
+        });
+
 
         const store = {
             isVisible,

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test [if] and [show] updates</title>
+    <style>
+        .test-section {
+            margin: 20px 0;
+            padding: 10px;
+            border: 2px solid #ccc;
+        }
+        .visible { background: lightgreen; }
+        .hidden { background: lightcoral; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <h1>Testing watch</h1>
+
+        <div class="test-section">
+            <h3>Test 2: [show] directive</h3>
+            <p>isShown: <span id="show-status">false</span></p>
+
+            <button @click="toggleShow">Toggle [show]</button>
+
+            <p>Count is: {count}</p>
+            <p>Double is: {double}</p>
+            
+            <div [show]="isShown" class="visible">
+                <p>This element uses [show] - should show/hide</p>
+            </div>
+        </div>
+
+    </div>
+
+    <script type="module">
+        import { ref, computed, watch, scanBindings } from '../reactive.js';
+
+        const isShown = ref(false);
+        const count = ref(0);
+
+        const double = computed(() => count.value * 2);
+
+        const toggleShow = () => {
+            isShown.value = !isShown.value;
+        };
+
+        watch(isShown, (isShown) => {
+            if (isShown) {
+                count.value++;
+            }
+        });
+
+        setTimeout(() => {
+            isShown.value = true;
+        }, 2000);
+
+
+        const store = {
+            isShown,
+            count,
+            double,
+            toggleShow,
+        };
+
+        // Initialize
+        scanBindings(document.getElementById('app'), store);
+
+    </script>
+</body>
+</html>
