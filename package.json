@@ -14,7 +14,7 @@
     "framework",
     "vue"
   ],
-  "author": "",
+  "author": "Alessio Giusti",
   "license": "MIT",
   "devDependencies": {
     "jsdom": "^23.0.0"
