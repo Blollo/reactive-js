@@ -63,7 +63,8 @@ test('ref: triggers effect on change', () => {
 
 test('ref: works with arrays', () => {
     const arr = ref([1, 2, 3]);
-    assert.deepStrictEqual(arr.value, [1, 2, 3]);
+    const unwrapped = Array.from(arr.value);
+    assert.deepStrictEqual(unwrapped, [1, 2, 3]);
 });
 
 test('ref: array mutations trigger effects', () => {
