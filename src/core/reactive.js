@@ -529,7 +529,10 @@ function fnCacheSet (key, fn) {
 export function scanBindings (root = document, store = window) {
     // bind data-for directive first, to handle scoped loop variables
     root.querySelectorAll("[data-for]").forEach(el => {
-        if (scanned.has(el)) {
+        if (
+            scanned.has(el)
+            || isInsideNestedFor(el, root)
+        ) {
             return;
         }
 
