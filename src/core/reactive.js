@@ -79,27 +79,36 @@ function queueEffect (effect) {
         }
     }
 }
+const MAX_FLUSH_ITERATIONS = 100;
+
 function flushEffectQueue () {
     isFlushPending = false;
     isFlushing = true;
 
-    try {
-        const effects = Array.from(effectQueue);
-        effectQueue.clear();
+    let iterations = 0;
 
-        effects.forEach(fn => {
-            if (!fn.stopped) {
-                fn();
+    try {
+        while (effectQueue.size > 0) {
+            if (++iterations > MAX_FLUSH_ITERATIONS) {
+                effectQueue.clear();
+                throw new Error(
+                    `[reactive] Possible infinite reactive loop detected: ` +
+                    `effect queue was still non-empty after ${MAX_FLUSH_ITERATIONS} flush iterations.`
+                );
             }
-        });
+
+            const effects = Array.from(effectQueue);
+            effectQueue.clear();
+
+            for (const fn of effects) {
+                if (!fn.stopped) {
+                    fn();
+                }
+            }
+        }
     }
     finally {
         isFlushing = false;
-
-        // if new effects were queued during flush, flush again
-        if (effectQueue.size > 0) {
-            flushEffectQueue();
-        }
     }
 }
 function trigger (subscribers) {
@@ -299,6 +308,13 @@ export function ref (initialValue) {
                 newVal = createArrayProxy(newVal, subs);
             }
 
+            // skip trigger if the value hasn't changed.
+            // arrays are exempt: their mutations go through the patched prototype
+            // and trigger directly, so identity equality would wrongly suppress them.
+            if (!Array.isArray(newVal) && target[prop] === newVal) {
+                return true;
+            }
+
             target[prop] = newVal;
             trigger(subs);
 
@@ -344,8 +360,22 @@ export function reactive (target) {
 
             const value = target[prop];
 
-            // recursively make nested objects reactive
             if (value && typeof value === "object") {
+                // arrays need the patched prototype + index-assignment proxy so
+                // that mutator methods (push, pop, splice…) call trigger().
+                // reactive() alone cannot intercept those because they bypass the
+                // proxy's set trap and operate directly on the raw target.
+                if (Array.isArray(value)) {
+                    // reuse the per-property subscriber set so reads and mutations
+                    // share the same set of dependents
+                    if (!value.__v_subs) {
+                        createArrayProxy(value, getSubscribers(prop));
+                    }
+
+                    return value;
+                }
+
+                // recursively make nested plain objects reactive
                 return reactive(value);
             }
 
@@ -430,11 +460,23 @@ export function watch (source, callback, options = {}) {
         }
 
         if (initialized || options.immediate) {
-            // run callback without tracking to prevent circular dependencies
-            const prev = activeEffect;
+            // run the callback without tracking to prevent the watcher from
+            // accidentally subscribing to reactive reads made inside the callback.
+            // we push a null sentinel onto the effectStack so that if a nested
+            // sync effect() runs inside the callback and then pops the stack, it
+            // restores activeEffect to null (our sentinel) rather than back to
+            // the watchEffect — which would re-enable accidental tracking for
+            // any reads that follow the nested effect call.
+            effectStack.push(null);
             activeEffect = null;
-            callback(newValue, oldValue);
-            activeEffect = prev;
+
+            try {
+                callback(newValue, oldValue);
+            }
+            finally {
+                effectStack.pop();
+                activeEffect = effectStack[effectStack.length - 1] || null;
+            }
         }
 
         oldValue = deepClone(newValue);
@@ -964,19 +1006,25 @@ function bindIf (el, expr, store) {
     let isInserted = false;
     let innerScope = null;
 
+    // remove el and all its descendants from the scanned set so that the next
+    // show re-scans everything into a fresh scope. called on hide so that
+    // stopped effects aren't left dangling with a stale scanned mark.
+    function unmarkScanned (root) {
+        scanned.delete(root);
+        root.querySelectorAll("*").forEach(child => scanned.delete(child));
+    }
+
     effect(() => {
         const show = !!evalInScope(expr, store);
 
         if (show && !isInserted) {
-            // scan the element inside a fresh scope so all its effects can be
-            // stopped together when it is hidden again
-            if (!scanned.has(el)) {
-                innerScope = new EffectScope(activeScope);
+            // always scan into a fresh scope — unmarkScanned() on hide ensures
+            // scanned.has(el) is false here whenever the element was previously hidden
+            innerScope = new EffectScope(activeScope);
 
-                runInScope(innerScope, () => {
-                    scanBindings(el, store);
-                });
-            }
+            runInScope(innerScope, () => {
+                scanBindings(el, store);
+            });
 
             parent.insertBefore(el, comment);
             isInserted = true;
@@ -987,6 +1035,9 @@ function bindIf (el, expr, store) {
                 innerScope.stop();
                 innerScope = null;
             }
+
+            // clear scanned marks so the next show re-scans from scratch
+            unmarkScanned(el);
 
             if (el.parentNode) {
                 parent.replaceChild(comment, el);
