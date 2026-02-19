@@ -9,6 +9,7 @@ A lightweight, Vue-inspired reactive framework that brings reactivity and declar
 - 🔄 **Two-Way Data Binding** - Automatic input synchronization
 - 👀 **Watchers** - React to state changes
 - ⚡ **Automatic Updates** - Efficient batched DOM updates
+- 🧩 **Web Components** - Build encapsulated components with `ReactiveComponent`
 - 🪶 **Lightweight** - No build step required
 
 ## Installation
@@ -428,6 +429,281 @@ const store = {
 
 ---
 
+### Component Two-Way Binding
+
+#### `model:prop-name`
+
+Binds a parent store ref to a reactive prop on a child `ReactiveComponent`, keeping both sides in sync automatically.
+
+```html
+<my-counter model:count="appCount"></my-counter>
+```
+
+```javascript
+const store = {
+  appCount: ref(0)
+};
+
+scanBindings(document.body, store);
+```
+
+The directive handles both directions: when `appCount` changes in the parent the child's prop updates, and when the child emits `update:count` the parent ref is written back.
+
+**Note:** `model:` only works with props declared as reactive (using the `ref()` marker) in the child's `static props`. Using it on a non-reactive prop throws an error.
+
+**Difference between `[model]` and `model:`:**
+- `[model]` - Two-way binding for native form inputs (`<input>`, `<select>`, `<textarea>`)
+- `model:` - Two-way binding for `ReactiveComponent` custom element props
+
+---
+
+## Web Components
+
+`ReactiveComponent` is a base class for building encapsulated custom elements. It wires the shadow DOM, reactive state, and props together so subclasses only need to declare what varies.
+
+### Defining a Component
+
+Extend `ReactiveComponent` and override `setup()`, `template()`, and optionally `style()`:
+
+```javascript
+import { ReactiveComponent } from './ReactiveComponent.js';
+import { ref, computed } from './reactive.js';
+
+class MyCounter extends ReactiveComponent {
+  setup() {
+    const count = ref(0);
+    const double = computed(() => count.value * 2);
+
+    const increment = () => count.value++;
+    const decrement = () => count.value--;
+
+    return { count, double, increment, decrement };
+  }
+
+  template() {
+    return `
+      <button @click="decrement">-</button>
+      <span>{count} (x2: {double})</span>
+      <button @click="increment">+</button>
+    `;
+  }
+
+  style() {
+    return `
+      <style>
+        :host { display: flex; gap: 8px; align-items: center; }
+        button { padding: 4px 10px; }
+      </style>
+    `;
+  }
+}
+
+customElements.define('my-counter', MyCounter);
+```
+
+```html
+<my-counter></my-counter>
+```
+
+---
+
+### Props
+
+#### `static props`
+
+Declares which HTML attributes the component accepts and their types. Props are available on `this.props` inside `setup()`.
+
+Supported types: `String`, `Number`, `Boolean`, `Array`, `Object`.
+
+```javascript
+class MyCounter extends ReactiveComponent {
+  static props = {
+    label: String,        // non-reactive: plain value, does not update the DOM when changed
+    count: ref(Number),   // reactive: becomes a ref, DOM updates automatically when the attribute changes
+  };
+
+  setup() {
+    const count = this.props.count; // ref — already reactive
+    const label = this.props.label; // plain string
+
+    const increment = () => count.value++;
+
+    return { count, label, increment };
+  }
+
+  template() {
+    return `<button @click="increment">{label}: {count}</button>`;
+  }
+}
+
+customElements.define('my-counter', MyCounter);
+```
+
+```html
+<my-counter label="Score" count="0"></my-counter>
+```
+
+**Prop types and coercion:**
+
+| Type | HTML attribute | `this.props` value |
+|------|---------------|-------------------|
+| `String` | `"hello"` | `"hello"` |
+| `Number` | `"42"` | `42` |
+| `Boolean` | `"false"` | `false` |
+| `Array` | `"[1,2,3]"` | `[1, 2, 3]` |
+| `Object` | `"{\"a\":1}"` | `{ a: 1 }` |
+
+**Note:** Attribute names follow standard HTML kebab-case convention. They are automatically mapped to camelCase in `static props` and `this.props`.
+
+```html
+<!-- HTML attribute: kebab-case -->
+<my-counter my-label="Score" initial-count="5"></my-counter>
+```
+
+```javascript
+static props = {
+  myLabel: String,          // maps to my-label attribute
+  initialCount: ref(Number) // maps to initial-count attribute
+};
+```
+
+**Note:** Passing an attribute that is not declared in `static props` throws an error.
+
+---
+
+### Lifecycle Hooks
+
+Override these methods in your subclass to run code at specific points in the component's life.
+
+#### `onMounted()`
+
+Called once, immediately after the component's shadow DOM has been rendered and all bindings are active.
+
+```javascript
+class MyCounter extends ReactiveComponent {
+  setup() {
+    return { count: ref(0) };
+  }
+
+  onMounted() {
+    console.log('Component is live');
+  }
+
+  template() {
+    return `<span>{count}</span>`;
+  }
+}
+```
+
+#### `onUnmounted()`
+
+Called when the component is removed from the DOM. All internal effects are stopped automatically after this hook runs.
+
+```javascript
+class MyTimer extends ReactiveComponent {
+  setup() {
+    const seconds = ref(0);
+    this._interval = setInterval(() => seconds.value++, 1000);
+    return { seconds };
+  }
+
+  onUnmounted() {
+    clearInterval(this._interval);
+  }
+
+  template() {
+    return `<span>{seconds}s</span>`;
+  }
+}
+```
+
+---
+
+### Emitting Events
+
+#### `this.emit(eventName, detail)`
+
+Dispatches a composed, bubbling `CustomEvent` from the component element, allowing parent contexts to listen with `@eventname` or `addEventListener`.
+
+```javascript
+class MyInput extends ReactiveComponent {
+  setup() {
+    const value = ref('');
+
+    const onInput = () => {
+      this.emit('change', value.value);
+    };
+
+    return { value, onInput };
+  }
+
+  template() {
+    return `<input [model]="value" @input="onInput" />`;
+  }
+}
+```
+
+```html
+<!-- Parent listens with a standard event handler -->
+<my-input @change="handleChange"></my-input>
+```
+
+---
+
+### Two-Way Binding with `model:`
+
+When a parent wants to keep one of its refs in sync with a child component's reactive prop, use the `model:` directive on the child element and have the child emit `update:<prop-name>` whenever the value changes internally.
+
+```html
+<!-- parent template -->
+<my-counter model:count="appCount"></my-counter>
+<p>App count: {appCount}</p>
+```
+
+```javascript
+// parent store
+const store = {
+  appCount: ref(10)
+};
+
+scanBindings(document.body, store);
+```
+
+```javascript
+// child component
+class MyCounter extends ReactiveComponent {
+  static props = {
+    count: ref(Number)
+  };
+
+  setup() {
+    const count = this.props.count;
+
+    const increment = () => {
+      count.value++;
+      this.emit('update:count', count.value); // notify parent
+    };
+
+    return { count, increment };
+  }
+
+  template() {
+    return `
+      <span>{count}</span>
+      <button @click="increment">+</button>
+    `;
+  }
+}
+
+customElements.define('my-counter', MyCounter);
+```
+
+**How it works:**
+- **Parent → child:** when `appCount` changes, the `count` attribute on `<my-counter>` is updated automatically, which triggers `attributeChangedCallback` and updates the internal ref.
+- **Child → parent:** when the child calls `this.emit('update:count', newValue)`, the directive catches the event and writes the new value back into `appCount`.
+
+---
+
 ## Complete Example
 
 ```html
@@ -569,6 +845,39 @@ const store = {
 <div [show]="isMenuOpen">Menu</div>
 ```
 
+### 6. Declare only what needs to update the DOM as a reactive prop
+
+```javascript
+// ✅ Good — only count drives DOM updates, label is static
+static props = {
+  label: String,
+  count: ref(Number)
+};
+
+// ❌ Avoid — making everything reactive adds unnecessary overhead
+static props = {
+  label: ref(String),
+  count: ref(Number)
+};
+```
+
+### 7. Always emit `update:<prop-name>` when mutating a bound prop
+
+When a component is used with `model:`, the parent relies on the child emitting the right event to stay in sync. Make it a habit to emit immediately after mutating a reactive prop.
+
+```javascript
+// ✅ Good
+const increment = () => {
+  count.value++;
+  this.emit('update:count', count.value);
+};
+
+// ❌ Avoid — parent ref will drift out of sync
+const increment = () => {
+  count.value++;
+};
+```
+
 ---
 
 ## Testing
@@ -596,6 +905,7 @@ npm run test:watch
 Works in all modern browsers that support:
 - ES6 Proxy
 - ES6 Modules
+- Custom Elements (Web Components)
 - MutationObserver
 
 ---
