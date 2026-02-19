@@ -507,7 +507,7 @@ export function watch (source, callback, options = {}) {
 const scanned = new WeakSet();
 
 // kebab-case  →  camelCase   (my-prop → myProp)
-// used by bindDinamycModel to look up the declared prop on the child component
+// used by bindDynamicModel to look up the declared prop on the child component
 function kebabToCamel (str) {
     return str.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 }
@@ -598,7 +598,7 @@ export function scanBindings (root = document, store = window) {
             if (name.startsWith("model:")) {
                 const propAttr = name.slice("model:".length); // e.g. "my-prop"
                 el.removeAttribute(name);
-                bindDinamycModel(el, propAttr, value, store);
+                bindDynamicModel(el, propAttr, value, store);
             }
             else if (name.startsWith("data-attr-") || name.startsWith(":")) {
                 const realAttr = name.startsWith("data-attr-")
@@ -634,6 +634,17 @@ export function scanBindings (root = document, store = window) {
 
 
 /* <binding-helpers> */
+
+// module-level constant — allocated once rather than inside every evalInScope call
+const KEYWORDS = new Set([
+    "await", "break", "case", "catch", "class", "const", "continue",
+    "debugger", "default", "delete", "do", "else", "export", "extends",
+    "finally", "for", "function", "if", "import", "in", "instanceof",
+    "let", "new", "return", "static", "super", "switch", "this", "throw",
+    "try", "typeof", "var", "void", "while", "with", "yield",
+    "true", "false", "null", "undefined", "NaN", "Infinity"
+]);
+
 function unwrapRef (v) {
     if (
         v
@@ -653,16 +664,6 @@ function evalInScope (expr, store) {
     }
 
     try {
-        // javascript keywords that should not be treated as variables
-        const keywords = new Set([
-            "await", "break", "case", "catch", "class", "const", "continue",
-            "debugger", "default", "delete", "do", "else", "export", "extends",
-            "finally", "for", "function", "if", "import", "in", "instanceof",
-            "let", "new", "return", "static", "super", "switch", "this", "throw",
-            "try", "typeof", "var", "void", "while", "with", "yield",
-            "true", "false", "null", "undefined", "NaN", "Infinity"
-        ]);
-
         // extract potential variable names from the expression
         const varPattern = /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g;
         const matches = expr.matchAll(varPattern);
@@ -672,7 +673,7 @@ function evalInScope (expr, store) {
             const varName = match[1];
 
             // skip javascript keywords
-            if (!keywords.has(varName)) {
+            if (!KEYWORDS.has(varName)) {
                 potentialVars.add(varName);
             }
         }
@@ -944,6 +945,10 @@ function bindText (el, expr, store) {
     });
 }
 function bindHTML (el, expr, store) {
+    // ⚠️  XSS WARNING: innerHTML is set directly from the store expression with no
+    // sanitization. Only bind trusted, developer-controlled strings here — never
+    // render raw user input with [html]. Use [text] / curly interpolation instead,
+    // which sets textContent and is always safe.
     effect(() => {
         const result = evalInScope(expr, store);
         el.innerHTML = result == null ? "" : result;
@@ -1103,7 +1108,7 @@ function bindDynamicAttribute (el, attrName, expr, store) {
         }
     });
 }
-function bindDinamycModel (el, propAttr, expr, store) {
+function bindDynamicModel (el, propAttr, expr, store) {
     // propAttr is the kebab-case prop name as written in the attribute,
     // e.g. "my-prop" from bind:my-prop="reactiveVar"
     const camelKey = kebabToCamel(propAttr);
@@ -1224,7 +1229,7 @@ function bindCurlyInterpolations (node, scope) {
     });
 }
 function bindEventListeners (el, store) {
-    for (const attr of el.attributes) {
+    for (const attr of Array.from(el.attributes)) {
         const { name, value } = attr;
 
         if (name.startsWith("data-on") || name.startsWith("@")) {
