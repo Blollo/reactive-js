@@ -184,7 +184,7 @@ let activeScope = null;
 export function effectScope (parent) {
     return new EffectScope(parent ?? activeScope);
 }
-function runInScope (scope, fn) {
+export function runInScope (scope, fn) {
     const prev = activeScope;
     activeScope = scope;
 
@@ -430,11 +430,18 @@ export function watch (source, callback, options = {}) {
         }
 
         if (initialized || options.immediate) {
-            // run callback without tracking to prevent circular dependencies
+            // run callback without tracking to prevent circular dependencies.
+            // use try/finally so activeEffect is always restored even if the
+            // callback throws, preventing silent corruption of the tracking state.
             const prev = activeEffect;
             activeEffect = null;
-            callback(newValue, oldValue);
-            activeEffect = prev;
+
+            try {
+                callback(newValue, oldValue);
+            }
+            finally {
+                activeEffect = prev;
+            }
         }
 
         oldValue = deepClone(newValue);
@@ -461,14 +468,6 @@ export function watch (source, callback, options = {}) {
 // |____/ \___/|_|  |_| |____/|_|_| |_|\__,_|_|_| |_|\__, |
 //                                                   |___/
 //
-
-const scanned = new WeakSet();
-
-// kebab-case  →  camelCase   (my-prop → myProp)
-// used by bindDinamycModel to look up the declared prop on the child component
-function kebabToCamel (str) {
-    return str.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-}
 
 const directives = {
     "ref":           bindElementRef,
@@ -526,18 +525,18 @@ function fnCacheSet (key, fn) {
     fnCache.set(key, fn);
 }
 
-export function scanBindings (root = document, store = window) {
+export function scanBindings (root = document, store = window, scanned = new WeakSet()) {
+    // collect event listener records so they can be removed when the scope stops
+    const listenerRecords = [];
+
     // bind data-for directive first, to handle scoped loop variables
     root.querySelectorAll("[data-for]").forEach(el => {
-        if (
-            scanned.has(el)
-            || isInsideNestedFor(el, root)
-        ) {
+        if (scanned.has(el)) {
             return;
         }
 
         scanned.add(el);
-        bindFor(el, store);
+        bindFor(el, store, scanned);
     });
 
     // bind all other directives
@@ -549,16 +548,11 @@ export function scanBindings (root = document, store = window) {
 
         scanned.add(el);
 
-        // bind dynamic attributes and bind: two-way bindings
+        // bind dynamic attributes
         for (const attr of el.attributes) {
             const { name, value } = attr;
 
-            if (name.startsWith("model:")) {
-                const propAttr = name.slice("model:".length); // e.g. "my-prop"
-                el.removeAttribute(name);
-                bindDinamycModel(el, propAttr, value, store);
-            }
-            else if (name.startsWith("data-attr-") || name.startsWith(":")) {
+            if (name.startsWith("data-attr-") || name.startsWith(":")) {
                 const realAttr = name.startsWith("data-attr-")
                     ? name.replace("data-attr-", "")
                     : name.replace(":", "");
@@ -571,12 +565,13 @@ export function scanBindings (root = document, store = window) {
         // bind standard directives
         for (const [attr, fn] of Object.entries(directives)) {
             if (el.hasAttribute(attr)) {
-                fn(el, el.getAttribute(attr), store);
+                fn(el, el.getAttribute(attr), store, scanned);
             }
         }
 
-        // bind event listeners
-        bindEventListeners(el, store);
+        // bind event listeners and track the records for later cleanup
+        const records = bindEventListeners(el, store);
+        listenerRecords.push(...records);
 
         // bind curly bracket interpolations
         // exclude script/style tags because css and js syntax break the interpolation parsing
@@ -588,6 +583,19 @@ export function scanBindings (root = document, store = window) {
             processCurlyInterpolations(el, store);
         }
     });
+
+    // if there is an active scope, attach listener cleanup to it so that
+    // when the scope stops (e.g. component unmount, [if] hide), all event
+    // listeners added during this scan are automatically removed
+    if (activeScope && listenerRecords.length > 0) {
+        const cleanupEffect = { stop () {
+                for (const { el, eventName, handler } of listenerRecords) {
+                    el.removeEventListener(eventName, handler);
+                }
+            }, stopped: false };
+
+        activeScope.add(cleanupEffect);
+    }
 }
 
 
@@ -795,7 +803,7 @@ function setDeep (store, expr, value) {
 
 
 /* <binding-functions> */
-function bindFor (el, store) {
+function bindFor (el, store, scanned) {
     const parent = el.parentNode;
     const comment = document.createComment("v-for placeholder");
     parent.replaceChild(comment, el); // remove template
@@ -870,13 +878,13 @@ function bindFor (el, store) {
             const iterScope = new EffectScope(activeScope);
             iterationScopes.push(iterScope);
 
-            // remove scanned marks so nested data-for elements are re-scanned
-            clone.querySelectorAll("[data-for]").forEach(n => scanned.delete(n));
-            scanned.delete(clone);
+            // each iteration uses a fresh scanned set so that clones and
+            // their nested data-for elements are always processed cleanly
+            const iterScanned = new WeakSet();
 
             runInScope(iterScope, () => {
                 processCurlyInterpolations(clone, scopedForBindings);
-                scanBindings(clone, scopedForBindings);
+                scanBindings(clone, scopedForBindings, iterScanned);
             });
 
             parent.insertBefore(clone, comment);
@@ -956,7 +964,7 @@ function bindModel (el, expr, store) {
         });
     }
 }
-function bindIf (el, expr, store) {
+function bindIf (el, expr, store, scanned) {
     const parent = el.parentNode;
     const comment = document.createComment("v-if placeholder");
     parent.replaceChild(comment, el);
@@ -968,15 +976,15 @@ function bindIf (el, expr, store) {
         const show = !!evalInScope(expr, store);
 
         if (show && !isInserted) {
-            // scan the element inside a fresh scope so all its effects can be
-            // stopped together when it is hidden again
-            if (!scanned.has(el)) {
-                innerScope = new EffectScope(activeScope);
+            // always create a fresh scope on (re-)insertion so all inner effects
+            // are owned and can be stopped cleanly when the element is hidden again
+            innerScope = new EffectScope(activeScope);
 
-                runInScope(innerScope, () => {
-                    scanBindings(el, store);
-                });
-            }
+            runInScope(innerScope, () => {
+                // use a fresh scanned set each time so bindings are re-applied
+                // after the element was hidden and its previous effects stopped
+                scanBindings(el, store, new WeakSet());
+            });
 
             parent.insertBefore(el, comment);
             isInserted = true;
@@ -1052,70 +1060,6 @@ function bindDynamicAttribute (el, attrName, expr, store) {
         }
     });
 }
-function bindDinamycModel (el, propAttr, expr, store) {
-    // propAttr is the kebab-case prop name as written in the attribute,
-    // e.g. "my-prop" from bind:my-prop="reactiveVar"
-    const camelKey = kebabToCamel(propAttr);
-
-    // verify the target element is a ReactiveComponent that declares this prop
-    // as reactive. we do this lazily (after connectedCallback) so the custom
-    // element has had time to upgrade and populate its static props.
-    const assertReactiveProp = () => {
-        const propsDef = el.constructor?.props;
-
-        if (!propsDef || !(camelKey in propsDef)) {
-            throw new Error(`bind: "${propAttr}" is not declared in the target component's static props.`);
-        }
-
-        const declaration = propsDef[camelKey];
-        const isReactive  = (
-            declaration !== null
-            && typeof declaration === "object"
-            && "value" in declaration
-            && typeof declaration.value === "function"
-        );
-
-        if (!isReactive) {
-            throw new Error(`bind: "${propAttr}" must be declared as a reactive prop (use ref() marker) to support two-way binding.`);
-        }
-    };
-
-    // ── parent → child ────────────────────────────────────────────────────────
-    // whenever the parent store expression changes, push the new value down
-    // by setting the attribute on the child element. the child's
-    // attributeChangedCallback will pick it up and update its internal ref.
-    effect(() => {
-        const value = evalInScope(expr, store);
-
-        // serialise Arrays/Objects so they survive the attribute round-trip
-        const serialised = (value !== null && typeof value === "object")
-            ? JSON.stringify(value)
-            : String(value ?? "");
-
-        el.setAttribute(propAttr, serialised);
-    });
-
-    // ── child → parent ────────────────────────────────────────────────────────
-    // listen for the update:<prop> custom event the child is expected to emit
-    // when it mutates the prop internally, then write the new value back into
-    // the parent store ref.
-    el.addEventListener(`update:${propAttr}`, e => {
-        // late validation: runs after the element has upgraded
-        assertReactiveProp();
-
-        const varName = expr.trim();
-        const target  = store[varName];
-
-        if (target && typeof target === "object" && "value" in target) {
-            // parent store variable is a ref — update it directly
-            target.value = e.detail;
-        }
-        else {
-            // fall back to setDeep for dotted paths (e.g. "user.count")
-            setDeep(store, varName, e.detail);
-        }
-    });
-}
 function bindCurlyInterpolations (node, scope) {
     const original = node.textContent;
 
@@ -1173,6 +1117,8 @@ function bindCurlyInterpolations (node, scope) {
     });
 }
 function bindEventListeners (el, store) {
+    const listeners = [];
+
     for (const attr of el.attributes) {
         const { name, value } = attr;
 
@@ -1195,7 +1141,7 @@ function bindEventListeners (el, store) {
                 continue;
             }
 
-            el.addEventListener(eventName, e => {
+            const handler = e => {
                 let args = [];
 
                 if (argsStr) {
@@ -1227,9 +1173,14 @@ function bindEventListeners (el, store) {
 
                 // execute function with args and pass event as last arg
                 fn(...args, e);
-            });
+            };
+
+            el.addEventListener(eventName, handler);
+            listeners.push({ el, eventName, handler });
         }
     }
+
+    return listeners;
 }
 /* </binding-functions> */
 
