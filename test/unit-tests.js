@@ -1,4 +1,4 @@
-import { ref, reactive, computed, watch, effect } from '../reactive.js';
+import { ref, reactive, computed, watch, effect } from '../src/core/reactive.js';
 import assert from 'assert';
 
 // Test utilities

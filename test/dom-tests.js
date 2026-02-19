@@ -1,5 +1,5 @@
 import { JSDOM } from 'jsdom';
-import { ref, reactive, computed, scanBindings } from '../reactive.js';
+import { ref, reactive, computed, scanBindings } from '../src/core/reactive.js';
 import assert from 'assert';
 
 // Setup jsdom
