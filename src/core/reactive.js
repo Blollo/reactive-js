@@ -843,7 +843,14 @@ function bindFor (el, store) {
     const comment = document.createComment("v-for placeholder");
     parent.replaceChild(comment, el); // remove template
 
-    const expr = el.getAttribute("data-for");
+    const expr    = el.getAttribute("data-for");
+    const keyExpr = el.getAttribute(":key") || null;
+
+    // consume :key from the template so it isn't processed as a dynamic
+    // attribute binding by scanBindings when each clone is scanned
+    if (keyExpr) {
+        el.removeAttribute(":key");
+    }
 
     // match: (item, index) of items
     // match: item of items
@@ -857,15 +864,26 @@ function bindFor (el, store) {
 
     const [, loopVar, indexVar, arrayExpr] = match;
 
+    if (keyExpr) {
+        bindForKeyed(el, store, parent, comment, loopVar, indexVar, arrayExpr, keyExpr);
+    }
+    else {
+        bindForUnkeyed(el, store, parent, comment, loopVar, indexVar, arrayExpr);
+    }
+}
+
+// ── unkeyed: full teardown + rebuild on every change (original behaviour) ────
+
+function bindForUnkeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr) {
     let children        = [];
     let iterationScopes = [];
 
     effect(() => {
         const arr = evalInScope(arrayExpr, store) || [];
 
-        // stop all effects owned by the previous iteration scopes before removing clones.
-        // this unsubscribes them from all deps so detached nodes can be garbage collected.
-        for (let scope of iterationScopes) {
+        // stop all effects owned by the previous iteration scopes before removing
+        // clones so detached nodes can be garbage collected
+        for (const scope of iterationScopes) {
             scope.stop();
         }
 
@@ -876,56 +894,152 @@ function bindFor (el, store) {
         children = [];
 
         arr.forEach((item, index) => {
-            const clone = el.cloneNode(true);
-            clone.removeAttribute("data-for");
+            const { node, scope } = createIteration(
+                el, store, parent, loopVar, indexVar, item, index
+            );
 
-            const parentStore = store;
-
-            // scoped store — inherit parent store via prototype chain
-            const scoped = Object.create(store);
-            scoped[loopVar] = item;
-
-            if (indexVar) {
-                scoped[indexVar] = index;
-            }
-
-            // proxy that falls back to the parent store for keys not in scoped
-            const scopedForBindings = new Proxy(scoped, {
-                get (target, key) {
-                    if (key === Symbol.unscopables) {
-                        return undefined;
-                    }
-
-                    if (key in target) {
-                        return target[key];
-                    }
-
-                    return unwrapRef(parentStore[key]);
-                },
-                has (_, key) {
-                    return (key in scoped) || (key in parentStore);
-                }
-            });
-
-            // each iteration gets its own scope so all effects it creates
-            // (text, model, class, interpolations, nested for…) can be
-            // stopped together when the list re-renders
-            const iterScope = new EffectScope(activeScope);
-            iterationScopes.push(iterScope);
-
-            // remove scanned marks so nested data-for elements are re-scanned
-            clone.querySelectorAll("[data-for]").forEach(n => scanned.delete(n));
-            scanned.delete(clone);
-
-            runInScope(iterScope, () => {
-                processCurlyInterpolations(clone, scopedForBindings);
-                scanBindings(clone, scopedForBindings);
-            });
-
-            parent.insertBefore(clone, comment);
-            children.push(clone);
+            iterationScopes.push(scope);
+            parent.insertBefore(node, comment);
+            children.push(node);
         });
     });
+}
+
+// ── keyed: diff old rows against new array, reuse/move/add/remove as needed ──
+
+function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr, keyExpr) {
+    // Map<key, { node, scope, itemRef, indexRef }>
+    // itemRef and indexRef are refs stored on the scoped store so that
+    // in-place updates to moved/retained rows automatically re-trigger
+    // the effects that were bound inside those rows during the initial scan
+    let rowsByKey = new Map();
+
+    effect(() => {
+        const arr    = evalInScope(arrayExpr, store) || [];
+        const oldMap = rowsByKey;
+
+        rowsByKey = new Map();
+
+        // cursor tracks the insertion point as we walk arr in reverse.
+        // each node is inserted immediately before the cursor, so processing
+        // right-to-left places nodes in correct forward DOM order.
+        let cursor = comment;
+
+        for (let i = arr.length - 1; i >= 0; i--) {
+            const item  = arr[i];
+            const index = i;
+
+            // evaluate the key expression against a minimal scoped context so
+            // we can look the item up in the old map without a full DOM clone
+            const keyScope    = Object.create(store);
+            keyScope[loopVar]  = item;
+
+            if (indexVar) {
+                keyScope[indexVar] = index;
+            }
+
+            const key = evalInScope(keyExpr, keyScope);
+
+            if (oldMap.has(key)) {
+                // ── reuse existing row ────────────────────────────────────────
+                const row = oldMap.get(key);
+                oldMap.delete(key);
+
+                // update the reactive refs that the row's effects depend on so
+                // any bindings that reference loopVar or indexVar re-render in place
+                row.itemRef.value = item;
+
+                if (indexVar) {
+                    row.indexRef.value = index;
+                }
+
+                // move to the correct position if it isn't already there
+                if (row.node.nextSibling !== cursor) {
+                    parent.insertBefore(row.node, cursor);
+                }
+
+                cursor = row.node;
+                rowsByKey.set(key, row);
+            }
+            else {
+                // ── new row ───────────────────────────────────────────────────
+                // wrap loopVar and indexVar as refs so future updates to this
+                // row (if it gets reused after a subsequent re-render) can be
+                // pushed reactively without re-scanning the node
+                const itemRef  = ref(item);
+                const indexRef = ref(index);
+
+                const { node, scope } = createIteration(
+                    el, store, parent, loopVar, indexVar, itemRef, indexRef
+                );
+
+                parent.insertBefore(node, cursor);
+                cursor = node;
+                rowsByKey.set(key, { node, scope, itemRef, indexRef });
+            }
+        }
+
+        // ── remove rows that are no longer in the array ───────────────────────
+        for (const { node, scope } of oldMap.values()) {
+            scope.stop();
+            node.remove();
+        }
+    });
+}
+
+// ── shared helper: clone the template, build the scoped store, scan bindings ─
+
+function createIteration (el, store, parent, loopVar, indexVar, item, index) {
+    const clone = el.cloneNode(true);
+    clone.removeAttribute("data-for");
+
+    const parentStore = store;
+
+    // scoped store — own properties shadow the parent store
+    // item and index may be plain values (unkeyed path) or refs (keyed path);
+    // either way evalInScope unwraps refs automatically, so templates are written
+    // the same way regardless of which path created the row
+    const scoped = Object.create(store);
+    scoped[loopVar] = item;
+
+    if (indexVar) {
+        scoped[indexVar] = index;
+    }
+
+    // proxy so that store keys not overridden by the loop scope are still
+    // accessible and parent refs are unwrapped on the way out
+    const scopedForBindings = new Proxy(scoped, {
+        get (target, key) {
+            if (key === Symbol.unscopables) {
+                return undefined;
+            }
+
+            if (key in target) {
+                return target[key];
+            }
+
+            return unwrapRef(parentStore[key]);
+        },
+        has (_, key) {
+            return (key in scoped) || (key in parentStore);
+        }
+    });
+
+    // give the iteration its own scope so all its effects can be stopped
+    // together when the row is removed or the list is torn down
+    const iterScope = new EffectScope(activeScope);
+
+    // clear scanned marks on the clone so nested data-for elements are
+    // picked up fresh by the scanBindings call below
+    clone.querySelectorAll("[data-for]").forEach(n => scanned.delete(n));
+    scanned.delete(clone);
+
+    runInScope(iterScope, () => {
+        processCurlyInterpolations(clone, scopedForBindings);
+        scanBindings(clone, scopedForBindings);
+    });
+
+    return { node: clone, scope: iterScope };
 }
 function bindElementRef (el, name, store) {
     if (!name) {
