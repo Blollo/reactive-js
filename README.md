@@ -10,6 +10,7 @@ A lightweight, Vue-inspired reactive framework that brings reactivity and declar
 - 👀 **Watchers** - React to state changes
 - ⚡ **Automatic Updates** - Efficient batched DOM updates
 - 🧩 **Web Components** - Build encapsulated components with `ReactiveComponent`
+- 📡 **Event Bus** - Global publish/subscribe messaging
 - 🪶 **Lightweight** - No build step required
 
 ## Installation
@@ -18,7 +19,20 @@ Include the framework in your HTML:
 
 ```html
 <script type="module">
-  import { ref, reactive, computed, watch, effect, scanBindings } from './reactive.js';
+  import {
+    ref,
+    reactive,
+    computed,
+    watch,
+    effect,
+    effectScope,
+    runInScope,
+    scanBindings,
+    on,
+    off,
+    emit,
+    defineEmits
+  } from './reactive.js';
 </script>
 ```
 
@@ -26,7 +40,7 @@ Include the framework in your HTML:
 
 ### `ref(value)`
 
-Creates a reactive reference to a primitive value.
+Creates a reactive reference to a value. Access and mutate through `.value`.
 
 ```javascript
 const count = ref(0);
@@ -34,6 +48,16 @@ console.log(count.value); // 0
 
 count.value = 5;
 console.log(count.value); // 5
+```
+
+Works with arrays too — mutator methods (`push`, `pop`, `splice`, etc.) and index assignments are reactive:
+
+```javascript
+const items = ref(['Apple', 'Banana']);
+
+items.value.push('Cherry');   // Reactive
+items.value[0] = 'Avocado';  // Reactive
+items.value = ['new', 'arr']; // Reactive (replaces the entire array)
 ```
 
 ### `reactive(object)`
@@ -51,9 +75,18 @@ const state = reactive({
 state.user.name = 'Bob'; // Reactive!
 ```
 
+Arrays inside reactive objects are also reactive:
+
+```javascript
+const state = reactive({ items: ['a', 'b'] });
+
+state.items.push('c');  // Reactive
+state.items[0] = 'z';   // Reactive
+```
+
 ### `computed(getter)`
 
-Creates a computed value that automatically updates when dependencies change.
+Creates a read-only reactive value that automatically updates when dependencies change. Computed values are **lazy** — the getter only re-runs when `.value` is read after a dependency has changed.
 
 ```javascript
 const count = ref(5);
@@ -62,12 +95,14 @@ const doubled = computed(() => count.value * 2);
 console.log(doubled.value); // 10
 
 count.value = 10;
-console.log(doubled.value); // 20 (updated automatically)
+console.log(doubled.value); // 20 (recomputed on read)
 ```
+
+Computed refs are read-only — setting `.value` has no effect.
 
 ### `watch(source, callback, options)`
 
-Watches a reactive value and executes a callback when it changes.
+Watches a reactive source and executes a callback when it changes. The callback receives the new and old values.
 
 ```javascript
 const count = ref(0);
@@ -79,40 +114,118 @@ watch(count, (newValue, oldValue) => {
 count.value = 5; // Triggers callback
 ```
 
-**Options:**
-- `immediate: true` - Execute callback immediately with current value
-- `deep: true` - Deep watch for reactive objects
+**Source types:**
 
 ```javascript
-const state = reactive({ count: 0 });
+// Watch a ref
+watch(count, (newVal, oldVal) => { /* ... */ });
+
+// Watch a getter function
+watch(() => state.count, (newVal, oldVal) => { /* ... */ });
+
+// Watch a reactive object (requires deep: true for nested changes)
+watch(state, (newVal, oldVal) => { /* ... */ }, { deep: true });
+```
+
+**Options:**
+- `immediate: true` — Execute callback immediately with the current value (`oldValue` will be `undefined` on the first call)
+- `deep: true` — Deep-watch a reactive object, tracking all nested property changes
+
+```javascript
+const state = reactive({ nested: { count: 0 } });
 
 watch(
-  () => state.count,
-  (newVal) => console.log('Count:', newVal),
-  { immediate: true }
+  state,
+  (newVal) => console.log('Deep change:', newVal.nested.count),
+  { deep: true, immediate: true }
 );
+```
+
+**Stopping a watcher:**
+
+`watch()` returns a stop handle:
+
+```javascript
+const stop = watch(count, (newVal) => { /* ... */ });
+
+// Later, when no longer needed
+stop.stop();
 ```
 
 ### `effect(callback, options)`
 
-Runs a callback immediately and re-runs it whenever reactive dependencies change.
+Runs a callback immediately and re-runs it whenever its reactive dependencies change. Returns a handle with a `.stop()` method.
 
 ```javascript
 const count = ref(0);
 
-effect(() => {
+const runner = effect(() => {
   console.log(`Count is: ${count.value}`);
 });
+// Logs: "Count is: 0"
 
 count.value = 5; // Logs: "Count is: 5"
+
+// Stop when no longer needed
+runner.stop();
 ```
 
 **Options:**
-- `sync: true` - Run synchronously (used internally for computed)
+- `sync: true` — Run the effect synchronously on every dependency change instead of batching via microtask. Use sparingly — sync effects can cause cascading updates.
+
+### `effectScope(parent?)`
+
+Creates a scope that collects every `effect()` and `computed()` created inside it. Calling `scope.stop()` tears them all down in one shot, including child scopes.
+
+```javascript
+const scope = effectScope();
+
+runInScope(scope, () => {
+  const count = ref(0);
+
+  effect(() => console.log(count.value));
+  const doubled = computed(() => count.value * 2);
+
+  // Both the effect and the computed's notifier are now owned by scope
+});
+
+// Later: stop all effects at once
+scope.stop();
+```
+
+Scopes nest automatically — a scope created while another scope is active becomes a child of that scope:
+
+```javascript
+const parent = effectScope();
+
+runInScope(parent, () => {
+  const child = effectScope(); // child is parented to parent
+
+  runInScope(child, () => {
+    effect(() => { /* ... */ });
+  });
+});
+
+parent.stop(); // also stops child and all its effects
+```
+
+### `runInScope(scope, fn)`
+
+Executes a function with the given scope as the active scope. Any effects or computed values created during `fn` are registered under `scope`.
+
+```javascript
+const scope = effectScope();
+
+runInScope(scope, () => {
+  effect(() => { /* registered under scope */ });
+});
+```
+
+---
 
 ## DOM Bindings
 
-Use `scanBindings(element, store)` to activate reactive bindings in your HTML.
+Use `scanBindings(element, store)` to activate reactive bindings in your HTML. The store is a plain object whose properties (refs, reactive objects, computed values, and functions) drive the template.
 
 ```javascript
 const store = {
@@ -132,11 +245,12 @@ scanBindings(document.body, store);
 
 #### `[text]` or `data-text`
 
-Binds element's text content to a reactive value.
+Binds an element's `textContent` to a reactive expression.
 
 ```html
 <span [text]="count"></span>
 <p data-text="name"></p>
+<p [text]="count * 2 + ' items'"></p>
 ```
 
 ```javascript
@@ -148,11 +262,31 @@ const store = {
 
 ---
 
+### HTML Binding
+
+#### `[html]` or `data-html`
+
+Binds an element's `innerHTML` to a reactive expression.
+
+```html
+<div [html]="richContent"></div>
+```
+
+```javascript
+const store = {
+  richContent: ref('<strong>Bold text</strong>')
+};
+```
+
+> ⚠️ **XSS Warning:** `[html]` sets `innerHTML` directly with no sanitization. Only bind trusted, developer-controlled strings — never render raw user input. Use `[text]` or curly interpolation for user-provided content, which sets `textContent` and is always safe.
+
+---
+
 ### Interpolation
 
 #### `{expression}`
 
-Embed reactive values directly in text content.
+Embed reactive expressions directly in text content.
 
 ```html
 <p>Hello {name}!</p>
@@ -169,13 +303,15 @@ const store = {
 };
 ```
 
+Interpolations work inside any element except `<script>` and `<style>` tags. They can contain any JavaScript expression that references store keys.
+
 ---
 
 ### Conditional Rendering
 
 #### `[if]` or `data-if`
 
-Conditionally renders an element (adds/removes from DOM).
+Conditionally renders an element (adds/removes from DOM). All effects inside the element's subtree are stopped when hidden and re-created when shown.
 
 ```html
 <div [if]="isVisible">
@@ -200,7 +336,7 @@ const store = {
 
 #### `[show]` or `data-show`
 
-Toggles element visibility using `display: none` (keeps element in DOM).
+Toggles element visibility using `display: none` (keeps element in DOM). Effects inside the element remain active.
 
 ```html
 <div [show]="isVisible">
@@ -215,8 +351,8 @@ const store = {
 ```
 
 **Difference between `[if]` and `[show]`:**
-- `[if]` - Removes element from DOM
-- `[show]` - Hides element with CSS (faster toggling, preserves state)
+- `[if]` — Removes element from DOM, stops/re-creates all internal effects
+- `[show]` — Hides element with CSS, effects stay active (faster toggling, preserves state)
 
 ---
 
@@ -233,8 +369,15 @@ Binds form inputs to reactive values (two-way binding).
 <!-- Checkbox -->
 <input type="checkbox" [model]="isChecked" />
 
-<!-- Number input -->
+<!-- Radio -->
+<input type="radio" name="color" value="red" [model]="color" />
+<input type="radio" name="color" value="blue" [model]="color" />
+
+<!-- Number input (value is coerced to Number automatically) -->
 <input type="number" [model]="age" />
+
+<!-- Range input (value is coerced to Number automatically) -->
+<input type="range" [model]="volume" min="0" max="100" />
 
 <!-- Textarea -->
 <textarea [model]="message"></textarea>
@@ -250,9 +393,41 @@ Binds form inputs to reactive values (two-way binding).
 const store = {
   name: ref(''),
   isChecked: ref(false),
+  color: ref('red'),
   age: ref(0),
+  volume: ref(50),
   message: ref(''),
   selected: ref('a')
+};
+```
+
+**Input type behaviour:**
+
+| Input type | Event listened | Value type |
+|---|---|---|
+| `checkbox` | `change` | `boolean` |
+| `radio` | `change` | `string` (the radio's `value` attribute) |
+| `number`, `range` | `input` | `number` |
+| `text`, `textarea`, others | `input` | `string` |
+| `select` | `change` | `string` |
+
+---
+
+### Disabled Binding
+
+#### `[disabled]` or `data-disabled`
+
+Binds an element's `disabled` property to a reactive expression.
+
+```html
+<button [disabled]="isLoading">Submit</button>
+<input [disabled]="!isEditable" />
+```
+
+```javascript
+const store = {
+  isLoading: ref(false),
+  isEditable: ref(true)
 };
 ```
 
@@ -262,7 +437,7 @@ const store = {
 
 #### `[class]` or `data-class`
 
-Dynamically adds classes to elements.
+Dynamically adds classes to elements. Static classes already on the element are always preserved.
 
 **String syntax:**
 ```html
@@ -272,6 +447,17 @@ Dynamically adds classes to elements.
 ```javascript
 const store = {
   classes: ref('active bold')
+};
+```
+
+**Array syntax:**
+```html
+<div [class]="classList">Styled</div>
+```
+
+```javascript
+const store = {
+  classList: ref(['active', 'bold'])
 };
 ```
 
@@ -300,7 +486,6 @@ Binds element attributes to reactive values.
 <!-- Using : syntax -->
 <a :href="url">Link</a>
 <img :src="imageSrc" :alt="imageAlt" />
-<button :disabled="isDisabled">Click</button>
 
 <!-- Using data-attr- syntax -->
 <div data-attr-id="elementId"></div>
@@ -312,10 +497,51 @@ const store = {
   url: ref('https://example.com'),
   imageSrc: ref('/image.jpg'),
   imageAlt: ref('Description'),
-  isDisabled: ref(false),
   elementId: ref('item-1'),
   placeholder: ref('Enter text...')
 };
+```
+
+**Boolean attributes:**
+
+For boolean HTML attributes (`hidden`, `disabled`, `readonly`, `required`, etc.), `false`, `null`, and `undefined` remove the attribute entirely, while `true` sets it as a valueless attribute:
+
+```html
+<div :hidden="isHidden">Secret</div>
+<input :readonly="isReadonly" />
+```
+
+```javascript
+const store = {
+  isHidden: ref(false),  // attribute absent
+  isReadonly: ref(true)   // readonly=""
+};
+```
+
+---
+
+### Element References
+
+#### `[ref]` or `ref`
+
+Stores a reference to the DOM element in the store, creating a ref if one doesn't already exist.
+
+```html
+<canvas [ref]="canvasEl"></canvas>
+<input ref="searchInput" />
+```
+
+```javascript
+const store = {
+  canvasEl: ref(null),
+  searchInput: ref(null)
+};
+
+scanBindings(document.body, store);
+
+// After scanBindings, the refs hold the actual DOM elements:
+// store.canvasEl.value → <canvas>
+// store.searchInput.value → <input>
 ```
 
 ---
@@ -324,7 +550,7 @@ const store = {
 
 #### `@event` or `data-onevent`
 
-Binds event listeners to methods.
+Binds event listeners to store methods.
 
 ```html
 <!-- Using @ syntax -->
@@ -338,9 +564,6 @@ Binds event listeners to methods.
 <!-- With arguments -->
 <button @click="addItem('Apple')">Add Apple</button>
 <button @click="setCount(10)">Set to 10</button>
-
-<!-- Event object access -->
-<input @input="handleInput($event)" />
 ```
 
 ```javascript
@@ -359,11 +582,11 @@ const store = {
     store.count.value = 0;
   },
 
-  addItem(item) {
+  addItem(item, event) {
     console.log('Adding:', item);
   },
 
-  setCount(value) {
+  setCount(value, event) {
     store.count.value = value;
   },
 
@@ -371,13 +594,33 @@ const store = {
     console.log('Input value:', event.target.value);
   },
 
-  handleBlur() {
+  handleBlur(event) {
     console.log('Input lost focus');
   }
 };
 ```
 
-**Supported events:** `click`, `input`, `change`, `submit`, `focus`, `blur`, `keyup`, `keydown`, `mouseenter`, `mouseleave`, etc.
+**The DOM event is always passed as the last argument.** When calling a bare function name (`@click="increment"`), the event is the sole argument. When calling with explicit arguments (`@click="setCount(10)"`), the event follows them.
+
+**Argument types in explicit calls:**
+
+| Syntax | Resolved as |
+|---|---|
+| `'Apple'` or `"Apple"` | String literal |
+| `10` | Number |
+| `myVar` | Unwrapped store value (`store.myVar.value` if ref) |
+
+**Supported events:** Any valid DOM event — `click`, `input`, `change`, `submit`, `focus`, `blur`, `keyup`, `keydown`, `mouseenter`, `mouseleave`, etc.
+
+> **Note:** Event modifiers (e.g. `@keyup.enter`) are **not** supported. Use a regular event listener and check the event manually:
+> ```html
+> <input @keyup="handleKeyup" />
+> ```
+> ```javascript
+> handleKeyup(event) {
+>   if (event.key === 'Enter') { /* ... */ }
+> }
+> ```
 
 ---
 
@@ -427,6 +670,28 @@ const store = {
 };
 ```
 
+**Keyed rendering with `:key`:**
+
+By default, `data-for` tears down and rebuilds every row on each change. For better performance with large or reorderable lists, add a `:key` attribute with a unique identifier. Keyed rendering reuses existing DOM nodes when items move, add, or are removed:
+
+```html
+<div data-for="user of users" :key="user.id">
+  <h3>{user.name}</h3>
+</div>
+```
+
+```javascript
+const store = {
+  users: ref([
+    { id: 1, name: 'Alice' },
+    { id: 2, name: 'Bob' },
+    { id: 3, name: 'Charlie' }
+  ])
+};
+```
+
+> **Note:** Keys must be unique within the list. Duplicate keys produce a console warning and cause unexpected behaviour.
+
 ---
 
 ### Component Two-Way Binding
@@ -452,8 +717,8 @@ The directive handles both directions: when `appCount` changes in the parent the
 **Note:** `model:` only works with props declared as reactive (using the `ref()` marker) in the child's `static props`. Using it on a non-reactive prop throws an error.
 
 **Difference between `[model]` and `model:`:**
-- `[model]` - Two-way binding for native form inputs (`<input>`, `<select>`, `<textarea>`)
-- `model:` - Two-way binding for `ReactiveComponent` custom element props
+- `[model]` — Two-way binding for native form inputs (`<input>`, `<select>`, `<textarea>`)
+- `model:` — Two-way binding for `ReactiveComponent` custom element props
 
 ---
 
@@ -504,6 +769,8 @@ customElements.define('my-counter', MyCounter);
 ```html
 <my-counter></my-counter>
 ```
+
+All effects and computed values created inside `setup()` and the subsequent `scanBindings()` call are collected under an internal effect scope. When the component is removed from the DOM, the scope is stopped and all effects are cleaned up automatically.
 
 ---
 
@@ -704,6 +971,63 @@ customElements.define('my-counter', MyCounter);
 
 ---
 
+## Event Bus
+
+The framework includes a lightweight global event bus for cross-component communication.
+
+### `on(eventName, handler)`
+
+Subscribes to an event.
+
+```javascript
+import { on } from './reactive.js';
+
+on('user:login', (user) => {
+  console.log('User logged in:', user.name);
+});
+```
+
+### `off(eventName, handler)`
+
+Unsubscribes a specific handler from an event.
+
+```javascript
+import { off } from './reactive.js';
+
+const handler = (user) => console.log(user);
+
+on('user:login', handler);
+off('user:login', handler); // removes this specific handler
+```
+
+### `emit(eventName, ...values)`
+
+Publishes an event, calling all subscribed handlers with the provided arguments.
+
+```javascript
+import { emit } from './reactive.js';
+
+emit('user:login', { name: 'Alice', role: 'admin' });
+```
+
+> **Note:** This is the module-level `emit()` function for the global event bus. It is different from `this.emit()` inside a `ReactiveComponent`, which dispatches a DOM `CustomEvent`.
+
+### `defineEmits(allowedEvents)`
+
+Creates a scoped emit function that only allows a predefined set of event names. Emitting an undeclared event logs a warning.
+
+```javascript
+import { defineEmits } from './reactive.js';
+
+const emit = defineEmits(['save', 'cancel']);
+
+emit('save', { id: 1 });    // OK
+emit('cancel');              // OK
+emit('delete', { id: 1 });  // Warning: "delete" is not declared
+```
+
+---
+
 ## Complete Example
 
 ```html
@@ -720,7 +1044,7 @@ customElements.define('my-counter', MyCounter);
     <input
       type="text"
       [model]="newTodo"
-      @keyup.enter="addTodo"
+      @keyup="handleKeyup"
       :placeholder="placeholder"
     />
     <button @click="addTodo">Add</button>
@@ -762,6 +1086,12 @@ customElements.define('my-counter', MyCounter);
             done: false
           });
           store.newTodo.value = '';
+        }
+      },
+
+      handleKeyup(event) {
+        if (event.key === 'Enter') {
+          store.addTodo();
         }
       },
 
@@ -837,11 +1167,11 @@ const store = {
 
 ### 5. Use appropriate conditional rendering
 
-```javascript
-// Use [if] for infrequent toggles (removes from DOM)
+```html
+<!-- Use [if] for infrequent toggles (removes from DOM) -->
 <div [if]="isLoggedIn">Dashboard</div>
 
-// Use [show] for frequent toggles (keeps in DOM)
+<!-- Use [show] for frequent toggles (keeps in DOM) -->
 <div [show]="isMenuOpen">Menu</div>
 ```
 
@@ -850,14 +1180,14 @@ const store = {
 ```javascript
 // ✅ Good — only count drives DOM updates, label is static
 static props = {
-  label: String,
-  count: ref(Number)
+    label: String,
+    count: ref(Number)
 };
 
 // ❌ Avoid — making everything reactive adds unnecessary overhead
 static props = {
-  label: ref(String),
-  count: ref(Number)
+    label: ref(String),
+    count: ref(Number)
 };
 ```
 
@@ -868,13 +1198,13 @@ When a component is used with `model:`, the parent relies on the child emitting 
 ```javascript
 // ✅ Good
 const increment = () => {
-  count.value++;
-  this.emit('update:count', count.value);
+    count.value++;
+    this.emit('update:count', count.value);
 };
 
 // ❌ Avoid — parent ref will drift out of sync
 const increment = () => {
-  count.value++;
+    count.value++;
 };
 ```
 
