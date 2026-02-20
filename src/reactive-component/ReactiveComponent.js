@@ -1,4 +1,4 @@
-import { ref, scanBindings, effectScope } from "../core/reactive.js";
+import { ref, scanBindings, effectScope, runInScope } from "../core/reactive.js";
 
 export class ReactiveComponent extends HTMLElement {
     constructor () {
@@ -98,12 +98,13 @@ export class ReactiveComponent extends HTMLElement {
         if (!this._mounted) {
             this._buildProps();
 
-            this.store = this.setup();
+            runInScope(this._scope, () => {
+                this.store = this.setup();
 
-            this.shadowRoot.innerHTML  = this.style();
-            this.shadowRoot.innerHTML += this.template();
+                this.shadowRoot.innerHTML = this.style() + this.template();
 
-            scanBindings(this.shadowRoot, this.store);
+                scanBindings(this.shadowRoot, this.store);
+            });
 
             this._mounted = true;
             this.onMounted?.();

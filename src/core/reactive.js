@@ -193,7 +193,7 @@ let activeScope = null;
 export function effectScope (parent) {
     return new EffectScope(parent ?? activeScope);
 }
-function runInScope (scope, fn) {
+export function runInScope (scope, fn) {
     const prev = activeScope;
     activeScope = scope;
 
@@ -291,12 +291,17 @@ export function ref (initialValue) {
     const data = { value: initialValue };
 
     return new Proxy(data, {
-        get (target, prop) {
+        get (target, prop, receiver) {
             if (prop === "value") {
                 track(subs);
 
                 return target[prop];
             }
+
+            // fall through for all other properties (Symbol.toPrimitive,
+            // Symbol.toStringTag, toJSON, etc.) so the ref behaves like
+            // a normal object for inspection, serialisation, and duck-typing
+            return Reflect.get(target, prop, receiver);
         },
         set (target, prop, newVal) {
             if (prop !== "value") {
@@ -369,10 +374,12 @@ export function reactive (target) {
                     // reuse the per-property subscriber set so reads and mutations
                     // share the same set of dependents
                     if (!value.__v_subs) {
-                        createArrayProxy(value, getSubscribers(prop));
+                        // store the proxy back on the raw target so the index-assignment
+                        // interception is preserved on subsequent reads
+                        target[prop] = createArrayProxy(value, getSubscribers(prop));
                     }
 
-                    return value;
+                    return target[prop];
                 }
 
                 // recursively make nested plain objects reactive
@@ -401,32 +408,112 @@ export function reactive (target) {
     return proxy;
 }
 export function computed (getter) {
-    const result = ref();
+    const subs = new Set();
+    let cached;
+    let dirty = true;
 
-    effect(() => {
-        result.value = getter();
-    }, { sync: true }); // computed effects run synchronously
+    // the notifier is a lightweight pseudo-effect whose only job is to
+    // subscribe to the getter's reactive dependencies. when any dependency
+    // changes, it marks the computed as dirty and notifies the computed's
+    // own subscribers (which will re-read .value and get the fresh result).
+    const notifier = function computedNotifier () {
+        if (notifier.stopped) {
+            return;
+        }
 
-    return result;
+        // a dependency changed — mark dirty and notify readers
+        if (!dirty) {
+            dirty = true;
+            trigger(subs);
+        }
+    };
+
+    notifier.deps    = [];
+    notifier.stopped = false;
+    notifier.sync    = true; // invalidation is synchronous
+
+    notifier.stop = function () {
+        if (!notifier.stopped) {
+            cleanup(notifier);
+            effectQueue.delete(notifier);
+            notifier.stopped = true;
+        }
+    };
+
+    // register with the active scope so it can be bulk-stopped later
+    if (activeScope && !activeScope.stopped) {
+        activeScope.add(notifier);
+    }
+
+    // run the getter, re-track dependencies, and cache the result
+    function recompute () {
+        cleanup(notifier);
+        effectStack.push(notifier);
+        activeEffect = notifier;
+
+        try {
+            cached = getter();
+        }
+        finally {
+            effectStack.pop();
+            activeEffect = effectStack[effectStack.length - 1] || null;
+        }
+
+        dirty = false;
+    }
+
+    // initial run to discover dependencies
+    recompute();
+
+    return new Proxy({ value: cached }, {
+        get (target, prop, receiver) {
+            if (prop === "value") {
+                if (dirty && !notifier.stopped) {
+                    recompute();
+                }
+
+                track(subs);
+
+                return cached;
+            }
+
+            return Reflect.get(target, prop, receiver);
+        },
+        set () {
+            // computed refs are read-only
+            return false;
+        }
+    });
 }
 export function watch (source, callback, options = {}) {
     let oldValue;
     let initialized = false;
 
-    const deepClone = (val) => {
+    const deepClone = (val, seen = new WeakSet()) => {
         if (val === null || typeof val !== "object") {
             return val;
         }
 
+        // guard against circular references
+        if (seen.has(val)) {
+            return undefined;
+        }
+
+        seen.add(val);
+
+        if (val instanceof Date) {
+            return new Date(val.getTime());
+        }
+
         if (Array.isArray(val)) {
-            return val.map(deepClone);
+            return val.map(item => deepClone(item, seen));
         }
 
         const cloned = {};
 
         for (const key in val) {
             if (Object.prototype.hasOwnProperty.call(val, key)) {
-                cloned[key] = deepClone(val[key]);
+                cloned[key] = deepClone(val[key], seen);
             }
         }
 
@@ -447,8 +534,10 @@ export function watch (source, callback, options = {}) {
         // if source is a reactive object, track it (deep watch if options.deep)
         else if (source && typeof source === "object" && source.__v_isReactive) {
             if (options.deep) {
-                // deep access to track all nested properties
-                newValue = JSON.parse(JSON.stringify(source));
+                // deep access to track all nested properties — deepClone
+                // traverses every key through the reactive proxy, triggering
+                // track() for each, and returns a plain snapshot
+                newValue = deepClone(source);
             }
             else {
                 newValue = source;
@@ -664,16 +753,20 @@ function evalInScope (expr, store) {
     }
 
     try {
-        // extract potential variable names from the expression
-        const varPattern = /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g;
-        const matches = expr.matchAll(varPattern);
+        // extract potential root-level variable names from the expression.
+        // the pattern alternation consumes string literals (single, double, and
+        // template quotes) so identifiers inside them are never captured.
+        // the negative lookbehind (?<!\.) ensures property-access tails like
+        // the "name" in "user.name" are skipped — only the root "user" is captured.
+        const varPattern = /(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)|(?<!\.)(\b[a-zA-Z_$][a-zA-Z0-9_$]*\b)/g;
         const potentialVars = new Set();
+        let match;
 
-        for (const match of matches) {
+        while ((match = varPattern.exec(expr)) !== null) {
             const varName = match[1];
 
-            // skip javascript keywords
-            if (!KEYWORDS.has(varName)) {
+            // match[1] is undefined when the alternation matched a string literal
+            if (varName && !KEYWORDS.has(varName)) {
                 potentialVars.add(varName);
             }
         }
@@ -1167,13 +1260,17 @@ function bindIf (el, expr, store) {
     });
 }
 function bindShow (el, expr, store) {
-    const originalDisplay = getComputedStyle(el).display || "";
+    // capture the element's own inline display value (if any) so we can
+    // restore it when showing. avoids getComputedStyle which may return
+    // "" or "none" before first layout or inside a hidden parent.
+    // restoring "" removes the inline override and lets CSS take over.
+    const inlineDisplay = el.style.display;
 
     effect(() => {
         const visible = !!evalInScope(expr, store);
 
         if (visible) {
-            el.style.setProperty("display", originalDisplay, "");
+            el.style.display = inlineDisplay;
         }
         else {
             el.style.setProperty("display", "none", "important");
@@ -1228,13 +1325,13 @@ function bindDynamicModel (el, propAttr, expr, store) {
     const camelKey = kebabToCamel(propAttr);
 
     // verify the target element is a ReactiveComponent that declares this prop
-    // as reactive. we do this lazily (after connectedCallback) so the custom
-    // element has had time to upgrade and populate its static props.
+    // as reactive. scheduled as a microtask so the custom element has had time
+    // to upgrade (connectedCallback) before we inspect static props.
     const assertReactiveProp = () => {
         const propsDef = el.constructor?.props;
 
         if (!propsDef || !(camelKey in propsDef)) {
-            throw new Error(`bind: "${propAttr}" is not declared in the target component's static props.`);
+            throw new Error(`model: "${propAttr}" is not declared in the target component's static props.`);
         }
 
         const declaration = propsDef[camelKey];
@@ -1246,9 +1343,12 @@ function bindDynamicModel (el, propAttr, expr, store) {
         );
 
         if (!isReactive) {
-            throw new Error(`bind: "${propAttr}" must be declared as a reactive prop (use ref() marker) to support two-way binding.`);
+            throw new Error(`model: "${propAttr}" must be declared as a reactive prop (use ref() marker) to support two-way binding.`);
         }
     };
+
+    // early validation — fires after upgrade instead of waiting for the first emit
+    queueMicrotask(assertReactiveProp);
 
     // ── parent → child ────────────────────────────────────────────────────────
     // whenever the parent store expression changes, push the new value down
@@ -1270,9 +1370,6 @@ function bindDynamicModel (el, propAttr, expr, store) {
     // when it mutates the prop internally, then write the new value back into
     // the parent store ref.
     el.addEventListener(`update:${propAttr}`, e => {
-        // late validation: runs after the element has upgraded
-        assertReactiveProp();
-
         const varName = expr.trim();
         const target  = store[varName];
 
@@ -1368,7 +1465,7 @@ function bindEventListeners (el, store) {
             el.addEventListener(eventName, e => {
                 let args = [];
 
-                if (argsStr) {
+                if (argsStr?.trim()) {
                     args = argsStr.split(",").map(arg => {
                         arg = arg.trim();
 
