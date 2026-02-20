@@ -1,6 +1,7 @@
 import { ReactiveComponent } from "../ReactiveComponent.js";
 import { ref, computed, watch, } from "../../core/reactive.js";
 import { useFocusTrap, } from "../Composables/useFocusTrap.js";
+import { useScrollLock, } from "../Composables/useScrollLock.js";
 
 class Panel extends ReactiveComponent {
     static props = {
@@ -151,10 +152,14 @@ class Panel extends ReactiveComponent {
             onEscape: onClosePanel,
         });
 
+        // Scroll Lock Composable
+        const scroll = useScrollLock();
+
         // Watchers
         watch(isOpen, (open) => {
             if (open) {
                 contentRemoved.value = false;
+                scroll.lock();
 
                 // wait for content to be added to start focus trap
                 setTimeout(() => {
@@ -168,6 +173,7 @@ class Panel extends ReactiveComponent {
                 }, 250);
 
                 trap.deactivate();
+                scroll.unlock();
             }
         });
 
