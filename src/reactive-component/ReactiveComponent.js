@@ -180,8 +180,3 @@ function coerceProp (raw, type) {
             return raw;
     }
 }
-
-
-// ── composables ───────────────────────────────────────────────────────────────
-
-

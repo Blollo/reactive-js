@@ -34,11 +34,13 @@ function getFocusableElements (container) {
         if (node.tagName === "SLOT") {
             const assigned = node.assignedElements({ flatten: true });
 
-            for (const el of assigned) {
-                walk(el);
-            }
+            if (assigned.length > 0) {
+                for (const el of assigned) {
+                    walk(el);
+                }
 
-            return;
+                return;
+            }
         }
 
         // Traverse children
