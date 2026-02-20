@@ -1,5 +1,9 @@
+import { ref, onScopeDispose, } from "../../core/reactive.js";
+
 const FOCUSABLE_SELECTOR = [
     "a[href]",
+    "hs-button",
+    "hs-segment",
     "button:not([disabled])",
     "input:not([disabled]):not([type='hidden'])",
     "select:not([disabled])",
@@ -8,27 +12,50 @@ const FOCUSABLE_SELECTOR = [
     "[contenteditable]:not([contenteditable='false'])"
 ].join(", ");
 
-// query focusable elements live on every call so dynamic content added or
-// removed via [if] / data-for is always accounted for
 function getFocusableElements (container) {
-    return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR))
-        .filter(el => !el.closest("[hidden]") && el.offsetParent !== null);
+    const focusable = [];
+
+    const walk = (node) => {
+        if (!node) {
+            return;
+        }
+
+        // If it's an element and matches selector
+        if (
+            node.nodeType === Node.ELEMENT_NODE
+            && node.matches?.(FOCUSABLE_SELECTOR)
+            && !node.closest("[hidden]")
+            && node.offsetParent !== null
+        ) {
+            focusable.push(node);
+        }
+
+        // If node is a slot → inspect assigned elements
+        if (node.tagName === "SLOT") {
+            const assigned = node.assignedElements({ flatten: true });
+
+            for (const el of assigned) {
+                walk(el);
+            }
+
+            return;
+        }
+
+        // Traverse children
+        const children = node.children;
+
+        if (children && children.length) {
+            for (const child of children) {
+                walk(child);
+            }
+        }
+    };
+
+    walk(container);
+
+    return focusable;
 }
 
-// useFocusTrap — a composable that traps keyboard focus within a container.
-//
-// call inside setup() to get automatic cleanup when the component unmounts.
-//
-//   const trap = useFocusTrap(this.shadowRoot, {
-//       autoActivate: false,
-//       onEscape:     () => this.emit("close"),
-//       initialFocus: null,
-//   });
-//
-//   trap.activate();
-//   trap.deactivate();
-//   trap.active  // ref(Boolean), usable in bindings/effects
-//
 export function useFocusTrap (container, options = {}) {
     const {
         autoActivate = false,
@@ -36,13 +63,16 @@ export function useFocusTrap (container, options = {}) {
         initialFocus = null,
     } = options;
 
-    const active           = ref(false);
-    let previouslyFocused  = null;
+    const active = ref(false);
+    let previouslyFocused = null;
 
-    // ── keyboard handler ──────────────────────────────────────────────────
+    // Keyboard Handler
 
     function handleKeydown (e) {
-        if (e.key === "Escape" && typeof onEscape === "function") {
+        if (
+            e.key === "Escape"
+            && typeof onEscape === "function"
+        ) {
             e.preventDefault();
             onEscape(e);
 
@@ -69,7 +99,7 @@ export function useFocusTrap (container, options = {}) {
         const current = container.activeElement ?? document.activeElement;
 
         if (e.shiftKey) {
-            // shift+tab on first element → wrap to last
+            // shift + tab on first element → wrap to last
             if (current === first || !focusable.includes(current)) {
                 e.preventDefault();
                 last.focus();
@@ -84,7 +114,7 @@ export function useFocusTrap (container, options = {}) {
         }
     }
 
-    // ── activate / deactivate ─────────────────────────────────────────────
+    // Activate / Deactivate
 
     function activate () {
         if (active.value) {
@@ -123,18 +153,23 @@ export function useFocusTrap (container, options = {}) {
             return;
         }
 
+        const focusable = getFocusableElements(container);
+
         container.removeEventListener("keydown", handleKeydown);
         active.value = false;
 
         // restore focus to the element that was focused before the trap
-        if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        if (
+            previouslyFocused &&
+            typeof previouslyFocused.focus === "function"
+        ) {
             previouslyFocused.focus();
         }
 
         previouslyFocused = null;
     }
 
-    // ── automatic lifecycle ───────────────────────────────────────────────
+    // Automatic Lifecycle
 
     if (autoActivate) {
         activate();
@@ -144,5 +179,10 @@ export function useFocusTrap (container, options = {}) {
     // component (or stopping the scope) tears the trap down automatically
     onScopeDispose(() => deactivate());
 
-    return { active, activate, deactivate };
+    return {
+        active,
+
+        activate,
+        deactivate
+    };
 }
