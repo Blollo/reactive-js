@@ -61,6 +61,7 @@ function getFocusableElements (container) {
 export function useFocusTrap (container, options = {}) {
     const {
         autoActivate = false,
+        guardFocus   = true,
         onEscape     = null,
         initialFocus = null,
     } = options;
@@ -68,7 +69,97 @@ export function useFocusTrap (container, options = {}) {
     const active = ref(false);
     let previouslyFocused = null;
 
-    // Keyboard Handler
+    // ── focus guard (inert) ───────────────────────────────────────────────
+    //
+    // when guardFocus is enabled, elements inside the container are marked
+    // `inert` while the trap is inactive, preventing any focus via Tab,
+    // click, or assistive technology.
+    //
+    // the native `inert` attribute propagates to all descendants
+    // automatically, so dynamically inserted children inside an already-
+    // inert parent are covered for free.
+    //
+    // however, when the container is a ShadowRoot (not an Element), we
+    // can't set `inert` on it directly — we apply it to each direct child
+    // element instead. a MutationObserver watches for new direct children
+    // added while the guard is active and marks them `inert` too.
+    //
+
+    let guardObserver = null;
+
+    function getGuardTargets () {
+        // ShadowRoot is not an Element — apply to each direct child element
+        if (container instanceof ShadowRoot) {
+            return Array.from(container.children);
+        }
+
+        return [container];
+    }
+
+    function applyGuard () {
+        if (!guardFocus) {
+            return;
+        }
+
+        for (const el of getGuardTargets()) {
+            el.inert = true;
+        }
+    }
+
+    function removeGuard () {
+        if (!guardFocus) {
+            return;
+        }
+
+        for (const el of getGuardTargets()) {
+            el.inert = false;
+        }
+    }
+
+    function startGuardObserver () {
+        if (!guardFocus || guardObserver) {
+            return;
+        }
+
+        // only needed when the container is a ShadowRoot, because new
+        // direct children won't inherit `inert` from a non-Element root.
+        // for regular Element containers, `inert` propagates natively.
+        if (!(container instanceof ShadowRoot)) {
+            return;
+        }
+
+        guardObserver = new MutationObserver((mutations) => {
+            // if the trap has been activated in the meantime, skip
+            if (active.value) {
+                return;
+            }
+
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        node.inert = true;
+                    }
+                }
+            }
+        });
+
+        guardObserver.observe(container, { childList: true });
+    }
+
+    function stopGuardObserver () {
+        if (guardObserver) {
+            guardObserver.disconnect();
+            guardObserver = null;
+        }
+    }
+
+    // apply the initial guard when the trap starts inactive
+    if (guardFocus && !autoActivate) {
+        applyGuard();
+        startGuardObserver();
+    }
+
+    // ── keyboard handler ──────────────────────────────────────────────────
 
     function handleKeydown (e) {
         if (
@@ -116,7 +207,7 @@ export function useFocusTrap (container, options = {}) {
         }
     }
 
-    // Activate / Deactivate
+    // ── activate / deactivate ─────────────────────────────────────────────
 
     function activate () {
         if (active.value) {
@@ -125,6 +216,10 @@ export function useFocusTrap (container, options = {}) {
 
         // save the element that had focus before the trap so we can restore it
         previouslyFocused = document.activeElement;
+
+        // lift the focus guard before attaching the trap
+        stopGuardObserver();
+        removeGuard();
 
         container.addEventListener("keydown", handleKeydown);
         active.value = true;
@@ -155,10 +250,12 @@ export function useFocusTrap (container, options = {}) {
             return;
         }
 
-        const focusable = getFocusableElements(container);
-
         container.removeEventListener("keydown", handleKeydown);
         active.value = false;
+
+        // re-apply the focus guard now that the trap is inactive
+        applyGuard();
+        startGuardObserver();
 
         // restore focus to the element that was focused before the trap
         if (
@@ -171,7 +268,7 @@ export function useFocusTrap (container, options = {}) {
         previouslyFocused = null;
     }
 
-    // Automatic Lifecycle
+    // ── automatic lifecycle ───────────────────────────────────────────────
 
     if (autoActivate) {
         activate();
@@ -179,7 +276,10 @@ export function useFocusTrap (container, options = {}) {
 
     // register cleanup with the active effect scope so unmounting the
     // component (or stopping the scope) tears the trap down automatically
-    onScopeDispose(() => deactivate());
+    onScopeDispose(() => {
+        deactivate();
+        stopGuardObserver();
+    });
 
     return {
         active,
