@@ -1,4 +1,4 @@
-import { ref, effect, scanBindings, effectScope, runInScope, onScopeDispose } from "../core/reactive.js";
+import { ref, scanBindings, effectScope, runInScope, } from "../core/reactive.js";
 
 export class ReactiveComponent extends HTMLElement {
     constructor () {
@@ -180,8 +180,3 @@ function coerceProp (raw, type) {
             return raw;
     }
 }
-
-
-// ── composables ───────────────────────────────────────────────────────────────
-
-
