@@ -113,7 +113,7 @@ class Panel extends ReactiveComponent {
                 role="dialog" 
                 aria-modal="true"
                 tabindex="-1">
-                <slot [if]="!contentRemoved"></slot>
+                <slot></slot>
             </div>
         </div>`;
     }
