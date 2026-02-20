@@ -205,6 +205,16 @@ export function runInScope (scope, fn) {
     }
 }
 
+// register a cleanup callback with the currently active scope.
+// when the scope is stopped the callback is invoked automatically.
+// this lets composable helpers hook into the teardown lifecycle without
+// coupling to ReactiveComponent internals.
+export function onScopeDispose (fn) {
+    if (activeScope && !activeScope.stopped) {
+        activeScope.add({ stop: fn });
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function effect (fn, options = {}) {
@@ -1039,7 +1049,7 @@ function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr,
             // the user has duplicate keys. clean up the earlier duplicate to
             // prevent orphaned DOM nodes and leaked scopes.
             if (rowsByKey.has(key)) {
-                console.error(
+                console.warn(
                     `[data-for] Duplicate :key "${key}" at index ${index}. ` +
                     `Each key must be unique — duplicates cause unexpected behaviour.`
                 );
