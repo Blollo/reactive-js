@@ -681,7 +681,9 @@ export function scanBindings (root = document, store = window) {
         scanned.add(el);
 
         // bind dynamic attributes and bind: two-way bindings
-        for (const attr of el.attributes) {
+        // snapshot the live NamedNodeMap before iterating because
+        // removeAttribute() inside the loop would shift indices
+        for (const attr of Array.from(el.attributes)) {
             const { name, value } = attr;
 
             if (name.startsWith("model:")) {
@@ -1033,6 +1035,21 @@ function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr,
 
             const key = evalInScope(keyExpr, keyScope);
 
+            // guard: if we've already seen this key in the current render pass,
+            // the user has duplicate keys. clean up the earlier duplicate to
+            // prevent orphaned DOM nodes and leaked scopes.
+            if (rowsByKey.has(key)) {
+                console.error(
+                    `[data-for] Duplicate :key "${key}" at index ${index}. ` +
+                    `Each key must be unique — duplicates cause unexpected behaviour.`
+                );
+
+                const dup = rowsByKey.get(key);
+                dup.scope.stop();
+                dup.node.remove();
+                rowsByKey.delete(key);
+            }
+
             if (oldMap.has(key)) {
                 // ── reuse existing row ────────────────────────────────────────
                 const row = oldMap.get(key);
@@ -1199,14 +1216,37 @@ function bindModel (el, expr, store) {
             setDeep(store, expr, el.value);
         });
     }
+    else if (el.tagName === "SELECT") {
+        effect(() => {
+            const val = evalInScope(expr, store);
+
+            if (el.value !== String(val ?? "")) {
+                el.value = val ?? "";
+            }
+        });
+
+        el.addEventListener("change", () => {
+            setDeep(store, expr, el.value);
+        });
+    }
     else {
+        const isNumeric = el.type === "number" || el.type === "range";
+
         effect(() => {
             const val = evalInScope(expr, store);
             el.value = val ?? "";
         });
 
         el.addEventListener("input", e => {
-            setDeep(store, expr, e.target.value);
+            const raw = e.target.value;
+
+            // coerce to number for numeric inputs so the store stays the right type
+            if (isNumeric) {
+                setDeep(store, expr, raw === "" ? "" : Number(raw));
+            }
+            else {
+                setDeep(store, expr, raw);
+            }
         });
     }
 }
@@ -1311,11 +1351,15 @@ function bindDynamicAttribute (el, attrName, expr, store) {
     effect(() => {
         const value = evalInScope(expr, store);
 
-        if (value === null) {
+        // null, undefined, and false all mean "remove the attribute".
+        // this is critical for boolean HTML attributes (hidden, disabled, readonly…)
+        // where setAttribute("disabled", false) produces disabled="false" — still truthy.
+        if (value === null || value === undefined || value === false) {
             el.removeAttribute(attrName);
         }
         else {
-            el.setAttribute(attrName, value);
+            // true → set the attribute with an empty value (boolean attribute convention)
+            el.setAttribute(attrName, value === true ? "" : value);
         }
     });
 }
