@@ -209,13 +209,12 @@ class Modal extends ReactiveComponent {
 
     setup () {
         // Props
-        const isOpen          = this.props.isOpen;
-        const staticBackdrop  = this.props.staticBackdrop ?? false;
+        const isOpen         = this.props.isOpen;
+        const staticBackdrop = this.props.staticBackdrop ?? false;
 
         // Refs
-        const dialog          = ref();
-        const modalWrapper    = ref();
-        const contentRemoved  = ref(false);
+        const dialog       = ref();
+        const modalWrapper = ref();
 
         // Computed
         const modalWrapperModifier = computed(() => ({
@@ -247,20 +246,10 @@ class Modal extends ReactiveComponent {
         // Watchers
         watch(isOpen, (open) => {
             if (open) {
-                contentRemoved.value = false;
                 scroll.lock();
-
-                // wait for content to be added to start focus trap
-                setTimeout(() => {
-                    trap.activate();
-                }, 10);
+                trap.activate();
             }
             else {
-                // wait for animation end to remove content inside modal
-                setTimeout(() => {
-                    contentRemoved.value = true;
-                }, 250);
-
                 trap.deactivate();
                 scroll.unlock();
             }
@@ -270,7 +259,6 @@ class Modal extends ReactiveComponent {
             modalWrapper,
             dialog,
             isOpen,
-            contentRemoved,
 
             modalWrapperModifier,
 

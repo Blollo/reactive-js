@@ -126,7 +126,6 @@ class Panel extends ReactiveComponent {
         // Refs
         const panel = ref();
         const panelWrapper = ref();
-        const contentRemoved = ref(false);
 
         // Computed
         const panelWrapperModifier = computed(() => ({
@@ -158,20 +157,10 @@ class Panel extends ReactiveComponent {
         // Watchers
         watch(isOpen, (open) => {
             if (open) {
-                contentRemoved.value = false;
                 scroll.lock();
-
-                // wait for content to be added to start focus trap
-                setTimeout(() => {
-                    trap.activate();
-                }, 10);
+                trap.activate();
             }
             else {
-                // wait for animation end to remove content inside panel
-                setTimeout(() => {
-                    contentRemoved.value = true;
-                }, 250);
-
                 trap.deactivate();
                 scroll.unlock();
             }
@@ -181,7 +170,6 @@ class Panel extends ReactiveComponent {
             panelWrapper,
             panel,
             isOpen,
-            contentRemoved,
 
             panelWrapperModifier,
 
