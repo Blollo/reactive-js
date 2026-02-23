@@ -78,7 +78,11 @@ class Modal extends ReactiveComponent {
                 background: rgba(0, 0, 0, 0.5);
 
                 opacity: 0;
-                transition: opacity var(--transition-duration) var(--transition);
+                transition: 
+                    opacity 200ms var(--transition, ease-in-out),
+                    backdrop-filter 200ms var(--transition, ease-in-out);
+
+                backdrop-filter: blur(3px);
             }
 
             /* ===== Dialog ===== */
@@ -209,12 +213,12 @@ class Modal extends ReactiveComponent {
 
     setup () {
         // Props
-        const isOpen         = this.props.isOpen;
-        const staticBackdrop = this.props.staticBackdrop ?? false;
+        const isOpen          = this.props.isOpen;
+        const staticBackdrop  = this.props.staticBackdrop ?? false;
 
         // Refs
-        const dialog       = ref();
-        const modalWrapper = ref();
+        const dialog          = ref();
+        const modalWrapper    = ref();
 
         // Computed
         const modalWrapperModifier = computed(() => ({
@@ -224,6 +228,7 @@ class Modal extends ReactiveComponent {
         // Methods
         const onCloseModal = () => {
             isOpen.value = false;
+
             this.emit("update:is-open", false);
         };
 
@@ -253,6 +258,10 @@ class Modal extends ReactiveComponent {
                 trap.deactivate();
                 scroll.unlock();
             }
+        });
+
+        this.addEventListener("hs-modal-close", () => {
+            onCloseModal();
         });
 
         return {

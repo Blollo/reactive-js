@@ -55,7 +55,9 @@ class Panel extends ReactiveComponent {
                 background: rgba(0, 0, 0, .45);
 
                 opacity: 0;
-                transition: opacity 200ms var(--transition, ease-in-out);
+                transition: 
+                    opacity 200ms var(--transition, ease-in-out),
+                    backdrop-filter 200ms var(--transition, ease-in-out);
 
                 backdrop-filter: blur(3px);
             }

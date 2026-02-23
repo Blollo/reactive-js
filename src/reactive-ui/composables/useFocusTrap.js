@@ -2,8 +2,6 @@ import { ref, onScopeDispose, } from "../../core/reactive.js";
 
 const FOCUSABLE_SELECTOR = [
     "a[href]",
-    "hs-button",
-    "hs-segment",
     "button:not([disabled])",
     "input:not([disabled]):not([type='hidden'])",
     "select:not([disabled])",
@@ -11,52 +9,6 @@ const FOCUSABLE_SELECTOR = [
     "[tabindex]:not([tabindex='-1'])",
     "[contenteditable]:not([contenteditable='false'])"
 ].join(", ");
-
-function getFocusableElements (container) {
-    const focusable = [];
-
-    const walk = (node) => {
-        if (!node) {
-            return;
-        }
-
-        // If it's an element and matches selector
-        if (
-            node.nodeType === Node.ELEMENT_NODE
-            && node.matches?.(FOCUSABLE_SELECTOR)
-            && !node.closest("[hidden]")
-            && node.offsetParent !== null
-        ) {
-            focusable.push(node);
-        }
-
-        // If node is a slot → inspect assigned elements
-        if (node.tagName === "SLOT") {
-            const assigned = node.assignedElements({ flatten: true });
-
-            if (assigned.length > 0) {
-                for (const el of assigned) {
-                    walk(el);
-                }
-
-                return;
-            }
-        }
-
-        // Traverse children
-        const children = node.children;
-
-        if (children && children.length) {
-            for (const child of children) {
-                walk(child);
-            }
-        }
-    };
-
-    walk(container);
-
-    return focusable;
-}
 
 export function useFocusTrap (container, options = {}) {
     const {
@@ -69,21 +21,21 @@ export function useFocusTrap (container, options = {}) {
     const active = ref(false);
     let previouslyFocused = null;
 
-    // ── focus guard (inert) ───────────────────────────────────────────────
-    //
-    // when guardFocus is enabled, elements inside the container are marked
-    // `inert` while the trap is inactive, preventing any focus via Tab,
-    // click, or assistive technology.
-    //
-    // the native `inert` attribute propagates to all descendants
-    // automatically, so dynamically inserted children inside an already-
-    // inert parent are covered for free.
-    //
-    // however, when the container is a ShadowRoot (not an Element), we
-    // can't set `inert` on it directly — we apply it to each direct child
-    // element instead. a MutationObserver watches for new direct children
-    // added while the guard is active and marks them `inert` too.
-    //
+    // Focus Guard
+    /*
+    ~  when guardFocus is enabled, elements inside the container are marked
+    ~  `inert` while the trap is inactive, preventing any focus via Tab,
+    ~  click, or assistive technology.
+    ~
+    ~  the native `inert` attribute propagates to all descendants
+    ~  automatically, so dynamically inserted children inside an already-
+    ~  inert parent are covered for free.
+    ~
+    ~  however, when the container is a ShadowRoot (not an Element), we
+    ~  can't set `inert` on it directly — we apply it to each direct child
+    ~  element instead. a MutationObserver watches for new direct children
+    ~  added while the guard is active and marks them `inert` too.
+    */
 
     let guardObserver = null;
 
@@ -159,7 +111,7 @@ export function useFocusTrap (container, options = {}) {
         startGuardObserver();
     }
 
-    // ── keyboard handler ──────────────────────────────────────────────────
+    // Keyboard Handler
 
     function handleKeydown (e) {
         if (
@@ -189,7 +141,7 @@ export function useFocusTrap (container, options = {}) {
 
         // activeElement lives on the shadow root for elements inside shadow DOM,
         // falling back to document.activeElement for light DOM containers
-        const current = container.activeElement ?? document.activeElement;
+        const current = getDeepActiveElement();
 
         if (e.shiftKey) {
             // shift + tab on first element → wrap to last
@@ -207,7 +159,7 @@ export function useFocusTrap (container, options = {}) {
         }
     }
 
-    // ── activate / deactivate ─────────────────────────────────────────────
+    // Activate / Deactivate
 
     function activate () {
         if (active.value) {
@@ -238,11 +190,14 @@ export function useFocusTrap (container, options = {}) {
         }
 
         // fall back to first focusable element
-        const focusable = getFocusableElements(container);
+        afterPaint(() => {
+            const focusable = getFocusableElements(container);
 
-        if (focusable.length > 0) {
-            focusable[0].focus();
-        }
+            // Focus is applied when the element is actually focusable in the rendered tree
+            if (focusable.length > 0) {
+                focusable[0].focus();
+            }
+        });
     }
 
     function deactivate () {
@@ -268,7 +223,7 @@ export function useFocusTrap (container, options = {}) {
         previouslyFocused = null;
     }
 
-    // ── automatic lifecycle ───────────────────────────────────────────────
+    // Automatic lifecycle
 
     if (autoActivate) {
         activate();
@@ -287,4 +242,73 @@ export function useFocusTrap (container, options = {}) {
         activate,
         deactivate
     };
+}
+// Helpers
+function getFocusableElements (container) {
+    const focusable = [];
+
+    const walk = (node) => {
+        if (!node) {
+            return;
+        }
+
+        // If it's an element and matches selector
+        if (
+            node.nodeType === Node.ELEMENT_NODE
+            && node.matches?.(FOCUSABLE_SELECTOR)
+            && !node.closest("[hidden]")
+            && node.offsetParent !== null
+        ) {
+            focusable.push(node);
+        }
+
+        // Walk shodow if present
+        if (node.shadowRoot) {
+            walk(node.shadowRoot);
+        }
+
+        // If node is a slot → inspect assigned elements
+        if (node.tagName === "SLOT") {
+            const assigned = node.assignedElements({ flatten: true });
+
+            if (assigned.length > 0) {
+                for (const el of assigned) {
+                    walk(el);
+                }
+            }
+
+            return;
+        }
+
+        // Traverse children
+        const children = node.children;
+
+        if (children && children.length) {
+            for (const child of children) {
+                walk(child);
+            }
+        }
+    };
+
+    walk(container);
+
+    return focusable;
+}
+
+function getDeepActiveElement(root = document) {
+    let active = root.activeElement;
+
+    while (active?.shadowRoot?.activeElement) {
+        active = active.shadowRoot.activeElement;
+    }
+
+    return active;
+}
+
+function afterPaint(callback) {
+    // waits until the next frame
+    requestAnimationFrame(() => {
+        // waits until layout + style + potential transitions settle
+        requestAnimationFrame(callback);
+    });
 }
