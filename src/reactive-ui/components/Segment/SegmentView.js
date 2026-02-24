@@ -43,6 +43,7 @@ class SegmentView extends ReactiveComponent {
         </style>`;
     }
 
+    // Template
     template () {
         return /*html*/`
         <div ref="scrollContainer" class="scroll-container">
@@ -133,12 +134,6 @@ class SegmentView extends ReactiveComponent {
         const index = this._contents.findIndex(c => c.id === contentId);
 
         if (index === -1) {
-            return;
-        }
-
-        // already showing this content — skip the programmatic scroll
-        // so we don't activate suppress and block the next user swipe
-        if (this._snap.activeIndex.value === index) {
             return;
         }
 
