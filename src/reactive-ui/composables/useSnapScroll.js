@@ -1,6 +1,5 @@
 import { ref, onScopeDispose, } from "../../core/reactive.js";
 
-// ── composable ────────────────────────────────────────────────────────────
 //
 // wraps a native CSS scroll-snap container to provide reactive swipe
 // tracking and programmatic navigation. the heavy lifting (momentum,
@@ -11,6 +10,14 @@ import { ref, onScopeDispose, } from "../../core/reactive.js";
 // registers correctly), then call init() in onMounted() once the DOM
 // element actually exists.
 //
+// snap detection uses two listeners for reliability:
+//   1. scrollend  → fires once the scroll has fully stopped (primary)
+//   2. scroll     → debounced fallback in case scrollend doesn't fire
+//                   (shadow DOM quirks, older browsers, fast gestures)
+//
+// this dual approach ensures swipe-to-snap is always detected regardless
+// of browser or gesture pattern.
+//
 
 export function useSnapScroll (options = {}) {
     const {
@@ -19,14 +26,29 @@ export function useSnapScroll (options = {}) {
 
     const activeIndex = ref(0);
 
-    let _container    = null;
-    let _scrollTimer  = null;
-    let _suppressSnap = false;
-    let _cleanups     = [];
+    let _container     = null;
+    let _scrollTimer   = null;
+    let _suppressUntil = 0;         // timestamp — suppress expires automatically
+    let _cleanups      = [];
 
     // Snap Detection
+    function isSuppressed () {
+        if (_suppressUntil === 0) {
+            return false;
+        }
+
+        // auto-expire the suppression so it can never get stuck
+        if (Date.now() >= _suppressUntil) {
+            _suppressUntil = 0;
+
+            return false;
+        }
+
+        return true;
+    }
+
     function detectSnap () {
-        if (!_container || _suppressSnap) {
+        if (!_container || isSuppressed()) {
             return;
         }
 
@@ -46,27 +68,29 @@ export function useSnapScroll (options = {}) {
     }
 
     // Init / Destroy
+
     function init (container) {
         _container = container;
 
-        // prefer scrollend for accuracy, fall back to debounced scroll
+        // always listen to debounced scroll as the reliable fallback —
+        // covers all browsers and catches gestures that scrollend misses
+        const onScroll = () => {
+            clearTimeout(_scrollTimer);
+            _scrollTimer = setTimeout(detectSnap, 120);
+        };
+
+        _container.addEventListener("scroll", onScroll, { passive: true });
+        _cleanups.push(() => {
+            _container.removeEventListener("scroll", onScroll);
+            clearTimeout(_scrollTimer);
+        });
+
+        // if scrollend is available, also listen to it for faster detection
         if ("onscrollend" in window) {
-            const handler = () => detectSnap();
+            const onScrollEnd = () => detectSnap();
 
-            _container.addEventListener("scrollend", handler);
-            _cleanups.push(() => _container.removeEventListener("scrollend", handler));
-        }
-        else {
-            const handler = () => {
-                clearTimeout(_scrollTimer);
-                _scrollTimer = setTimeout(detectSnap, 100);
-            };
-
-            _container.addEventListener("scroll", handler);
-            _cleanups.push(() => {
-                _container.removeEventListener("scroll", handler);
-                clearTimeout(_scrollTimer);
-            });
+            _container.addEventListener("scrollend", onScrollEnd);
+            _cleanups.push(() => _container.removeEventListener("scrollend", onScrollEnd));
         }
     }
 
@@ -75,11 +99,12 @@ export function useSnapScroll (options = {}) {
             cleanup();
         }
 
-        _cleanups   = [];
-        _container  = null;
+        _cleanups      = [];
+        _container     = null;
+        _suppressUntil = 0;
     }
 
-    // Navigation
+    // Programmatic Navigation
     function scrollToIndex (index, { behavior = "smooth" } = {}) {
         if (!_container) {
             return;
@@ -87,33 +112,31 @@ export function useSnapScroll (options = {}) {
 
         const childWidth = _container.offsetWidth;
 
-        // suppress the snap callback for programmatic scrolls — the caller
-        // already knows which index it's scrolling to, and we don't want to
-        // create a feedback loop when segment → view → segment.
-        _suppressSnap = true;
+        // suppress snap detection briefly so the programmatic scroll
+        // doesn't create a feedback loop (segment → view → segment).
+        // the time-based approach auto-expires even if scrollend never
+        // fires, preventing the suppress from getting stuck.
         activeIndex.value = index;
+
+        if (behavior === "instant") {
+            // no animation — suppress for just one frame
+            _suppressUntil = Date.now() + 50;
+        }
+        else {
+            // smooth animation — suppress long enough for it to settle
+            _suppressUntil = Date.now() + 500;
+        }
 
         _container.scrollTo({
             left:     index * childWidth,
             behavior: behavior,
         });
 
-        // re-enable snap detection after the scroll settles
-        const restore = () => {
-            _suppressSnap = false;
-        };
-
-        if (behavior === "instant") {
-            restore();
-        }
-        else {
-            // use scrollend if available, otherwise a generous timeout
-            if ("onscrollend" in window) {
-                _container.addEventListener("scrollend", restore, { once: true });
-            }
-            else {
-                setTimeout(restore, 350);
-            }
+        // clear suppress as soon as the programmatic scroll finishes
+        if (behavior !== "instant" && "onscrollend" in window) {
+            _container.addEventListener("scrollend", () => {
+                _suppressUntil = 0;
+            }, { once: true });
         }
     }
 
