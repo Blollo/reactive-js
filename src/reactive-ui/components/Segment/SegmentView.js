@@ -95,16 +95,18 @@ class SegmentView extends ReactiveComponent {
         if (this._segment) {
             this._segment._registerView(this);
 
-            // initial scroll to match the Segment's current value (no animation)
-            const initialContentId = this._segment._getContentIdForValue(
-                this._segment.props.value.value
-            );
+            // defer initial scroll so dynamic attribute bindings (e.g. :value)
+            // have had time to settle — microtask effects run before rAF, so
+            // by this point the Segment's value ref holds the final value
+            requestAnimationFrame(() => {
+                const contentId = this._segment._getContentIdForValue(
+                    this._segment.props.value.value
+                );
 
-            if (initialContentId) {
-                requestAnimationFrame(() => {
-                    this.scrollToContent(initialContentId, { behavior: "instant" });
-                });
-            }
+                if (contentId) {
+                    this.scrollToContent(contentId, { behavior: "instant" });
+                }
+            });
         }
 
         // observe dynamic height changes on content panels
