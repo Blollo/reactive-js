@@ -1,13 +1,13 @@
 import { ref, onScopeDispose, } from "../../core/reactive.js";
 
 const FOCUSABLE_SELECTOR = [
-    "a[href]",
-    "button:not([disabled])",
-    "input:not([disabled]):not([type='hidden'])",
-    "select:not([disabled])",
-    "textarea:not([disabled])",
+    "a[href]:not([tabindex='-1'])",
+    "button:not([disabled]):not([tabindex='-1'])",
+    "input:not([disabled]):not([type='hidden']):not([tabindex='-1'])",
+    "select:not([disabled]):not([tabindex='-1'])",
+    "textarea:not([disabled]):not([tabindex='-1'])",
     "[tabindex]:not([tabindex='-1'])",
-    "[contenteditable]:not([contenteditable='false'])"
+    "[contenteditable]:not([contenteditable='false']):not([tabindex='-1'])"
 ].join(", ");
 
 export function useFocusTrap (container, options = {}) {
@@ -112,7 +112,6 @@ export function useFocusTrap (container, options = {}) {
     }
 
     // Keyboard Handler
-
     function handleKeydown (e) {
         if (
             e.key === "Escape"
@@ -160,7 +159,6 @@ export function useFocusTrap (container, options = {}) {
     }
 
     // Activate / Deactivate
-
     function activate () {
         if (active.value) {
             return;
@@ -224,7 +222,6 @@ export function useFocusTrap (container, options = {}) {
     }
 
     // Automatic lifecycle
-
     if (autoActivate) {
         activate();
     }
@@ -243,26 +240,31 @@ export function useFocusTrap (container, options = {}) {
         deactivate
     };
 }
+
 // Helpers
 function getFocusableElements (container) {
-    const focusable = [];
+    const focusable = new Set();
 
     const walk = (node) => {
         if (!node) {
             return;
         }
 
-        // If it's an element and matches selector
+        // If it's an element and matches selector (and its acually focusable)
         if (
             node.nodeType === Node.ELEMENT_NODE
             && node.matches?.(FOCUSABLE_SELECTOR)
             && !node.closest("[hidden]")
-            && node.offsetParent !== null
         ) {
-            focusable.push(node);
+            const isHidden = isHiddenNode(node);
+            const hasSize = node.getClientRects().length > 0;
+
+            if (!isHidden && hasSize) {
+                focusable.add(node);
+            }
         }
 
-        // Walk shodow if present
+        // Walk shadow if present
         if (node.shadowRoot) {
             walk(node.shadowRoot);
         }
@@ -292,9 +294,10 @@ function getFocusableElements (container) {
 
     walk(container);
 
-    return focusable;
+    return Array.from(focusable);
 }
 
+// Helpers
 function getDeepActiveElement(root = document) {
     let active = root.activeElement;
 
@@ -311,4 +314,14 @@ function afterPaint(callback) {
         // waits until layout + style + potential transitions settle
         requestAnimationFrame(callback);
     });
+}
+
+function isHiddenNode (node) {
+    const style = getComputedStyle(node);
+
+    return (
+        style.display === "none"
+        || style.visibility === "hidden"
+        || style.visibility === "collapse"
+    );
 }
