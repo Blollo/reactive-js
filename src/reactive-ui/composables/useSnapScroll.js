@@ -68,7 +68,6 @@ export function useSnapScroll (options = {}) {
     }
 
     // Init / Destroy
-
     function init (container) {
         _container = container;
 
