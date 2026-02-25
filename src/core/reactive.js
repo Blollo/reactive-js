@@ -693,33 +693,7 @@ export function scanBindings (root = document, store = window) {
         // bind dynamic attributes and bind: two-way bindings
         // snapshot the live NamedNodeMap before iterating because
         // removeAttribute() inside the loop would shift indices
-        for (const attr of Array.from(el.attributes)) {
-            const { name, value } = attr;
-
-            if (name.startsWith("model:")) {
-                const propAttr = name.slice("model:".length); // e.g. "my-prop"
-                el.removeAttribute(name);
-                bindDynamicModel(el, propAttr, value, store);
-            }
-            else if (name.startsWith("data-attr-") || name.startsWith(":")) {
-                const realAttr = name.startsWith("data-attr-")
-                    ? name.replace("data-attr-", "")
-                    : name.replace(":", "");
-
-                el.removeAttribute(name);
-                bindDynamicAttribute(el, realAttr, value, store);
-            }
-        }
-
-        // bind standard directives
-        for (const [attr, fn] of Object.entries(directives)) {
-            if (el.hasAttribute(attr)) {
-                fn(el, el.getAttribute(attr), store);
-            }
-        }
-
-        // bind event listeners
-        bindEventListeners(el, store);
+        processElementBindings(el, store);
 
         // bind curly bracket interpolations
         // exclude script/style tags because css and js syntax break the interpolation parsing
@@ -943,6 +917,37 @@ function setDeep (store, expr, value) {
 
 
 /* <binding-functions> */
+function processElementBindings (el, store) {
+    // dynamic attributes and model: bindings
+    // snapshot the attributes array because removeAttribute shifts indices
+    for (const attr of Array.from(el.attributes)) {
+        const { name, value } = attr;
+
+        if (name.startsWith("model:")) {
+            const propAttr = name.slice("model:".length);
+            el.removeAttribute(name);
+            bindDynamicModel(el, propAttr, value, store);
+        }
+        else if (name.startsWith("data-attr-") || name.startsWith(":")) {
+            const realAttr = name.startsWith("data-attr-")
+                ? name.replace("data-attr-", "")
+                : name.replace(":", "");
+
+            el.removeAttribute(name);
+            bindDynamicAttribute(el, realAttr, value, store);
+        }
+    }
+
+    // standard directives (ref, [text], [model], [if], [show], [disabled], [class], [html])
+    for (const [attr, fn] of Object.entries(directives)) {
+        if (el.hasAttribute(attr)) {
+            fn(el, el.getAttribute(attr), store);
+        }
+    }
+
+    // event listeners (@click, data-onclick, etc.)
+    bindEventListeners(el, store);
+}
 function bindFor (el, store) {
     const parent = el.parentNode;
     const comment = document.createComment("v-for placeholder");
@@ -1156,8 +1161,11 @@ function createIteration (el, store, parent, loopVar, indexVar, item, index) {
 
     runInScope(iterScope, () => {
         processCurlyInterpolations(clone, scopedForBindings);
+        processElementBindings(clone, scopedForBindings);
         scanBindings(clone, scopedForBindings);
     });
+
+    scanned.add(clone);
 
     return { node: clone, scope: iterScope };
 }
