@@ -1,4 +1,5 @@
 import { ref, onScopeDispose, } from "../../core/reactive.js";
+import { useFocusGuard } from "./useFocusGuard.js";
 
 const FOCUSABLE_SELECTOR = [
     "a[href]:not([tabindex='-1'])",
@@ -21,94 +22,12 @@ export function useFocusTrap (container, options = {}) {
     const active = ref(false);
     let previouslyFocused = null;
 
-    // Focus Guard
-    /*
-    ~  when guardFocus is enabled, elements inside the container are marked
-    ~  `inert` while the trap is inactive, preventing any focus via Tab,
-    ~  click, or assistive technology.
-    ~
-    ~  the native `inert` attribute propagates to all descendants
-    ~  automatically, so dynamically inserted children inside an already-
-    ~  inert parent are covered for free.
-    ~
-    ~  however, when the container is a ShadowRoot (not an Element), we
-    ~  can't set `inert` on it directly — we apply it to each direct child
-    ~  element instead. a MutationObserver watches for new direct children
-    ~  added while the guard is active and marks them `inert` too.
-    */
-
-    let guardObserver = null;
-
-    function getGuardTargets () {
-        // ShadowRoot is not an Element — apply to each direct child element
-        if (container instanceof ShadowRoot) {
-            return Array.from(container.children);
-        }
-
-        return [container];
-    }
-
-    function applyGuard () {
-        if (!guardFocus) {
-            return;
-        }
-
-        for (const el of getGuardTargets()) {
-            el.inert = true;
-        }
-    }
-
-    function removeGuard () {
-        if (!guardFocus) {
-            return;
-        }
-
-        for (const el of getGuardTargets()) {
-            el.inert = false;
-        }
-    }
-
-    function startGuardObserver () {
-        if (!guardFocus || guardObserver) {
-            return;
-        }
-
-        // only needed when the container is a ShadowRoot, because new
-        // direct children won't inherit `inert` from a non-Element root.
-        // for regular Element containers, `inert` propagates natively.
-        if (!(container instanceof ShadowRoot)) {
-            return;
-        }
-
-        guardObserver = new MutationObserver((mutations) => {
-            // if the trap has been activated in the meantime, skip
-            if (active.value) {
-                return;
-            }
-
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        node.inert = true;
-                    }
-                }
-            }
-        });
-
-        guardObserver.observe(container, { childList: true });
-    }
-
-    function stopGuardObserver () {
-        if (guardObserver) {
-            guardObserver.disconnect();
-            guardObserver = null;
-        }
-    }
+    const guard = useFocusGuard(container);
 
     // apply the initial guard when the trap starts inactive
     if (guardFocus && !autoActivate) {
-        applyGuard();
-        startGuardObserver();
+        guard.apply();
+        guard.startObserver();
     }
 
     // Keyboard Handler
@@ -168,8 +87,10 @@ export function useFocusTrap (container, options = {}) {
         previouslyFocused = document.activeElement;
 
         // lift the focus guard before attaching the trap
-        stopGuardObserver();
-        removeGuard();
+        if (guardFocus) {
+            guard.stopObserver();
+            guard.remove();
+        }
 
         container.addEventListener("keydown", handleKeydown);
         active.value = true;
@@ -207,8 +128,10 @@ export function useFocusTrap (container, options = {}) {
         active.value = false;
 
         // re-apply the focus guard now that the trap is inactive
-        applyGuard();
-        startGuardObserver();
+        if (guardFocus) {
+            guard.apply();
+            guard.startObserver();
+        }
 
         // restore focus to the element that was focused before the trap
         if (
@@ -230,7 +153,6 @@ export function useFocusTrap (container, options = {}) {
     // component (or stopping the scope) tears the trap down automatically
     onScopeDispose(() => {
         deactivate();
-        stopGuardObserver();
     });
 
     return {
