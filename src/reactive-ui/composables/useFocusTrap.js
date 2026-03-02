@@ -297,7 +297,6 @@ function getFocusableElements (container) {
     return Array.from(focusable);
 }
 
-// Helpers
 function getDeepActiveElement(root = document) {
     let active = root.activeElement;
 
