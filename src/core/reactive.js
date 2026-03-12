@@ -291,6 +291,10 @@ function createArrayProxy (arr, subs) {
 }
 
 export function ref (initialValue) {
+    if (initialValue && typeof initialValue === "object" && initialValue.__v_isRef) {
+        return initialValue;
+    }
+
     const subs = new Set();
 
     // if it's an array, wrap it in a proxy
@@ -302,6 +306,10 @@ export function ref (initialValue) {
 
     return new Proxy(data, {
         get (target, prop, receiver) {
+            if (prop === "__v_isRef") {
+                return true;
+            }
+
             if (prop === "value") {
                 track(subs);
 
@@ -348,6 +356,10 @@ export function reactive (target) {
         return target;
     }
 
+    if (target.__v_isReactive) {
+        return target;
+    }
+
     // return existing proxy if already reactive
     if (reactiveMap.has(target)) {
         return reactiveMap.get(target);
@@ -369,6 +381,10 @@ export function reactive (target) {
             // don't intercept internal properties
             if (prop === "__v_isReactive") {
                 return true;
+            }
+
+            if (prop === "__proto__" || prop === "constructor" || prop === "prototype") {
+                return target[prop];
             }
 
             track(getSubscribers(prop));
@@ -399,16 +415,31 @@ export function reactive (target) {
             return value;
         },
         set (target, prop, newVal) {
-            const oldVal = target[prop];
+            if (prop === "__proto__" || prop === "constructor" || prop === "prototype") {
+                return false;
+            }
+
+            const oldVal = Reflect.get(target, prop);
 
             if (oldVal === newVal) {
                 return true;
             }
 
-            target[prop] = newVal;
+            const result = Reflect.set(target, prop, newVal);
             trigger(getSubscribers(prop));
 
-            return true;
+            return result;
+        },
+        deleteProperty (target, prop) {
+            const hasKey = prop in target;
+            const result = delete target[prop];
+
+            if (hasKey && result) {
+                trigger(getSubscribers(prop));
+                subsMap.delete(prop);
+            }
+
+            return result;
         }
     };
 
@@ -477,6 +508,10 @@ export function computed (getter) {
 
     return new Proxy({ value: cached }, {
         get (target, prop, receiver) {
+            if (prop === "__v_isRef") {
+                return true;
+            }
+
             if (prop === "value") {
                 if (dirty && !notifier.stopped) {
                     recompute();
