@@ -997,9 +997,10 @@ function bindFor (el, store) {
         el.removeAttribute(":key");
     }
 
-    // match: (item, index) of items
-    // match: item of items
-    const match = expr.match(/\(?\s*(\w+)(?:\s*,\s*(\w+))?\s*\)?\s+of\s+(.+)/);
+    // match: (item, index) of items                    — array (2 vars)
+    // match: item of items                             — array (1 var)
+    // match: (key, value, index) of obj                — object (3 vars)
+    const match = expr.match(/\(?\s*(\w+)(?:\s*,\s*(\w+))?(?:\s*,\s*(\w+))?\s*\)?\s+of\s+(.+)/);
 
     if (!match) {
         console.error("Invalid data-for expression:", expr);
@@ -1007,24 +1008,96 @@ function bindFor (el, store) {
         return;
     }
 
-    const [, loopVar, indexVar, arrayExpr] = match;
+    const [, var1, var2, var3, sourceExpr] = match;
 
     if (keyExpr) {
-        bindForKeyed(el, store, parent, comment, loopVar, indexVar, arrayExpr, keyExpr);
+        bindForKeyed(el, store, parent, comment, var1, var2, var3, sourceExpr, keyExpr);
     }
     else {
-        bindForUnkeyed(el, store, parent, comment, loopVar, indexVar, arrayExpr);
+        bindForUnkeyed(el, store, parent, comment, var1, var2, var3, sourceExpr);
     }
+}
+
+// ── helpers: normalise the evaluated source into a uniform entries array ──────
+//
+// returns an array of { item, key, value, index } descriptors regardless of
+// whether the source was an array or a plain object. the caller maps these
+// descriptors onto the template variables declared in data-for.
+
+function isPlainObject (val) {
+    return (
+        val !== null
+        && typeof val === "object"
+        && !Array.isArray(val)
+        && !(val instanceof Date)
+        && !(val instanceof RegExp)
+        && !(val instanceof Map)
+        && !(val instanceof Set)
+    );
+}
+
+function buildScopedVars (entry, var1, var2, var3, isObject) {
+    const vars = {};
+
+    if (isObject) {
+        // object iteration:
+        //   1 var  → entry pair [key, value]
+        //   2 vars → (key, value)
+        //   3 vars → (key, value, index)
+        if (!var2 && !var3) {
+            vars[var1] = [entry.key, entry.value];
+        }
+        else {
+            vars[var1] = entry.key;
+
+            if (var2) {
+                vars[var2] = entry.value;
+            }
+
+            if (var3) {
+                vars[var3] = entry.index;
+            }
+        }
+    }
+    else {
+        // array iteration (original behaviour):
+        //   1 var  → item
+        //   2 vars → (item, index)
+        //   3rd var is silently ignored for arrays
+        vars[var1] = entry.item;
+
+        if (var2) {
+            vars[var2] = entry.index;
+        }
+    }
+
+    return vars;
 }
 
 // ── unkeyed: full teardown + rebuild on every change (original behaviour) ────
 
-function bindForUnkeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr) {
+function bindForUnkeyed (el, store, parent, comment, var1, var2, var3, sourceExpr) {
     let children        = [];
     let iterationScopes = [];
 
     effect(() => {
-        const arr = evalInScope(arrayExpr, store) || [];
+        const source = evalInScope(sourceExpr, store);
+        const isObject = isPlainObject(source);
+
+        // normalise into an iterable list
+        let entries;
+
+        if (isObject) {
+            entries = Object.keys(source).map((key, index) => ({
+                key,
+                value: source[key],
+                index
+            }));
+        }
+        else {
+            const arr = source || [];
+            entries = arr.map((item, index) => ({ item, index }));
+        }
 
         // stop all effects owned by the previous iteration scopes before removing
         // clones so detached nodes can be garbage collected
@@ -1038,9 +1111,11 @@ function bindForUnkeyed (el, store, parent, comment, loopVar, indexVar, arrayExp
         children.forEach(node => node.remove());
         children = [];
 
-        arr.forEach((item, index) => {
+        entries.forEach((entry) => {
+            const scopeVars = buildScopedVars(entry, var1, var2, var3, isObject);
+
             const { node, scope } = createIteration(
-                el, store, parent, loopVar, indexVar, item, index
+                el, store, parent, scopeVars
             );
 
             iterationScopes.push(scope);
@@ -1052,35 +1127,50 @@ function bindForUnkeyed (el, store, parent, comment, loopVar, indexVar, arrayExp
 
 // ── keyed: diff old rows against new array, reuse/move/add/remove as needed ──
 
-function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr, keyExpr) {
-    // Map<key, { node, scope, itemRef, indexRef }>
-    // itemRef and indexRef are refs stored on the scoped store so that
+function bindForKeyed (el, store, parent, comment, var1, var2, var3, sourceExpr, keyExpr) {
+    // Map<key, { node, scope, varRefs }>
+    // varRefs is an object of refs stored on the scoped store so that
     // in-place updates to moved/retained rows automatically re-trigger
     // the effects that were bound inside those rows during the initial scan
     let rowsByKey = new Map();
 
     effect(() => {
-        const arr    = evalInScope(arrayExpr, store) || [];
-        const oldMap = rowsByKey;
+        const source   = evalInScope(sourceExpr, store);
+        const isObject = isPlainObject(source);
 
+        // normalise into an iterable list
+        let entries;
+
+        if (isObject) {
+            entries = Object.keys(source).map((key, idx) => ({
+                key,
+                value: source[key],
+                index: idx
+            }));
+        }
+        else {
+            const arr = source || [];
+            entries = arr.map((item, index) => ({ item, index }));
+        }
+
+        const oldMap = rowsByKey;
         rowsByKey = new Map();
 
-        // cursor tracks the insertion point as we walk arr in reverse.
+        // cursor tracks the insertion point as we walk entries in reverse.
         // each node is inserted immediately before the cursor, so processing
         // right-to-left places nodes in correct forward DOM order.
         let cursor = comment;
 
-        for (let i = arr.length - 1; i >= 0; i--) {
-            const item  = arr[i];
-            const index = i;
+        for (let i = entries.length - 1; i >= 0; i--) {
+            const entry    = entries[i];
+            const scopeVars = buildScopedVars(entry, var1, var2, var3, isObject);
 
             // evaluate the key expression against a minimal scoped context so
             // we can look the item up in the old map without a full DOM clone
-            const keyScope    = Object.create(store);
-            keyScope[loopVar]  = item;
+            const keyScope = Object.create(store);
 
-            if (indexVar) {
-                keyScope[indexVar] = index;
+            for (const [k, v] of Object.entries(scopeVars)) {
+                keyScope[k] = v;
             }
 
             const key = evalInScope(keyExpr, keyScope);
@@ -1090,7 +1180,7 @@ function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr,
             // prevent orphaned DOM nodes and leaked scopes.
             if (rowsByKey.has(key)) {
                 console.warn(
-                    `[data-for] Duplicate :key "${key}" at index ${index}. ` +
+                    `[data-for] Duplicate :key "${key}" at index ${i}. ` +
                     `Each key must be unique — duplicates cause unexpected behaviour.`
                 );
 
@@ -1106,11 +1196,11 @@ function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr,
                 oldMap.delete(key);
 
                 // update the reactive refs that the row's effects depend on so
-                // any bindings that reference loopVar or indexVar re-render in place
-                row.itemRef.value = item;
-
-                if (indexVar) {
-                    row.indexRef.value = index;
+                // any bindings that reference loop variables re-render in place
+                for (const [k, v] of Object.entries(scopeVars)) {
+                    if (row.varRefs[k]) {
+                        row.varRefs[k].value = v;
+                    }
                 }
 
                 // move to the correct position if it isn't already there
@@ -1123,23 +1213,26 @@ function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr,
             }
             else {
                 // ── new row ───────────────────────────────────────────────────
-                // wrap loopVar and indexVar as refs so future updates to this
+                // wrap each loop variable as a ref so future updates to this
                 // row (if it gets reused after a subsequent re-render) can be
                 // pushed reactively without re-scanning the node
-                const itemRef  = ref(item);
-                const indexRef = ref(index);
+                const varRefs = {};
+
+                for (const [k, v] of Object.entries(scopeVars)) {
+                    varRefs[k] = ref(v);
+                }
 
                 const { node, scope } = createIteration(
-                    el, store, parent, loopVar, indexVar, itemRef, indexRef
+                    el, store, parent, varRefs
                 );
 
                 parent.insertBefore(node, cursor);
                 cursor = node;
-                rowsByKey.set(key, { node, scope, itemRef, indexRef });
+                rowsByKey.set(key, { node, scope, varRefs });
             }
         }
 
-        // ── remove rows that are no longer in the array ───────────────────────
+        // ── remove rows that are no longer in the source ──────────────────────
         for (const { node, scope } of oldMap.values()) {
             scope.stop();
             node.remove();
@@ -1149,21 +1242,20 @@ function bindForKeyed (el, store, parent, comment, loopVar, indexVar, arrayExpr,
 
 // ── shared helper: clone the template, build the scoped store, scan bindings ─
 
-function createIteration (el, store, parent, loopVar, indexVar, item, index) {
+function createIteration (el, store, parent, scopeVars) {
     const clone = el.cloneNode(true);
     clone.removeAttribute("data-for");
 
     const parentStore = store;
 
-    // scoped store — own properties shadow the parent store
-    // item and index may be plain values (unkeyed path) or refs (keyed path);
+    // scoped store — own properties shadow the parent store.
+    // scopeVars may contain plain values (unkeyed path) or refs (keyed path);
     // either way evalInScope unwraps refs automatically, so templates are written
     // the same way regardless of which path created the row
     const scoped = Object.create(store);
-    scoped[loopVar] = item;
 
-    if (indexVar) {
-        scoped[indexVar] = index;
+    for (const [k, v] of Object.entries(scopeVars)) {
+        scoped[k] = v;
     }
 
     // proxy so that store keys not overridden by the loop scope are still
